@@ -1,0 +1,23 @@
+{
+  "name": "autojs6-devhelper",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "AutoJs6 开发辅助工具：ADB 实时投屏、区域坐标拾取、锚点取色",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "element-plus": "^2.8.8",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "sharp": "^0.33.5",
+    "vite": "^6.0.3",
+    "ws": "^8.18.0"
+  }
+}
