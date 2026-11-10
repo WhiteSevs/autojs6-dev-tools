@@ -77,7 +77,7 @@
 
 ```bash
 npm install
-npm run dev          # 打开 http://127.0.0.1:5273
+npm run dev          # 打开 http://127.0.0.1:5174
 ```
 
 > 该工具依赖 Vite 开发服务器提供的 `/api/*` 与 `/ws/screen`，请使用 `npm run dev`（`npm run build` 仅生成静态资源，不含设备通信后端）。
