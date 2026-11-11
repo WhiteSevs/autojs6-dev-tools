@@ -30,6 +30,14 @@
 
         <div class="set-row">
           <div class="set-text">
+            <div class="set-label">取消框选后恢复实时</div>
+            <div class="set-desc">按 Esc / Delete 或点「清空」移除区域时，自动解除画面冻结、恢复实时刷新（默认关闭）</div>
+          </div>
+          <el-switch :model-value="resumeOnClear" @update:model-value="(v) => emit('update:resumeOnClear', v)" />
+        </div>
+
+        <div class="set-row">
+          <div class="set-text">
             <div class="set-label">颜色格式</div>
             <div class="set-desc">锚点取色时按 C 复制出来的文本格式，按 Shift 可临时切换</div>
           </div>
@@ -154,10 +162,11 @@ const props = defineProps({
   colorFormat: { type: String, default: 'hex' },
   coordFormat: { type: String, default: 'bracket' },
   coordTemplate: { type: String, default: DEFAULT_COORD_TEMPLATE },
+  resumeOnClear: { type: Boolean, default: false },
   env: { type: Object, default: null },
 })
 
-const emit = defineEmits(['update:modelValue', 'update:toolbar', 'update:colorFormat', 'update:coordFormat', 'update:coordTemplate'])
+const emit = defineEmits(['update:modelValue', 'update:toolbar', 'update:colorFormat', 'update:coordFormat', 'update:coordTemplate', 'update:resumeOnClear'])
 
 const tab = ref('general')
 

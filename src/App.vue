@@ -195,7 +195,7 @@
             :empty-desc="
               imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
             "
-            @update:region="(v) => (region = v)"
+            @update:region="setRegion"
             @update:offset-picking="(v) => (offsetPicking = v)"
             @pick="onPick"
             @pick-offset="onPickOffset"
@@ -220,7 +220,7 @@
             :device-h="deviceH"
             :serial="activeSerial"
             :frame-id="displayMeta?.frameId"
-            @update:region="(v) => (region = v)"
+            @update:region="setRegion"
             @update:offsets="(v) => (offsets = v)"
             @update:picking="(v) => (offsetPicking = v)"
           />
@@ -328,11 +328,13 @@
       :color-format="colorFormat"
       :coord-format="coordFormat"
       :coord-template="coordTemplate"
+      :resume-on-clear="resumeOnClear"
       :env="env"
       @update:toolbar="setToolbarDefault"
       @update:color-format="setColorFormat"
       @update:coord-format="setCoordFormat"
       @update:coord-template="setCoordTemplate"
+      @update:resume-on-clear="setResumeOnClear"
     />
   </div>
 </template>
@@ -380,6 +382,7 @@ const settingsOpen = ref(false)
 const colorFormat = ref(readColorFormat())
 const coordFormat = ref(readCoordFormat())
 const coordTemplate = ref(readCoordTemplate())
+const resumeOnClear = ref(readResumeOnClear())
 
 /* 数据源：设备 / 本地图片 */
 const imageMode = ref(false)
@@ -492,6 +495,21 @@ function setCoordTemplate(v) {
   } catch {}
 }
 
+function readResumeOnClear() {
+  try {
+    return localStorage.getItem('autojs6.resumeOnRegionClear') === '1'
+  } catch {
+    return false
+  }
+}
+
+function setResumeOnClear(v) {
+  resumeOnClear.value = !!v
+  try {
+    localStorage.setItem('autojs6.resumeOnRegionClear', resumeOnClear.value ? '1' : '0')
+  } catch {}
+}
+
 function toggleRail() {
   railCollapsed.value = !railCollapsed.value
   try {
@@ -511,6 +529,18 @@ const finding = ref(false)
 const frozen = ref(false)
 /** '' | 'manual'（手动冻结） | 'lost'（设备断开，自动冻结并保留最后一帧） */
 const frozenReason = ref('')
+
+/**
+ * 统一的区域更新入口：ScreenStage（拖拽 / Esc / Delete）与 RegionPanel（清空 / 全屏）都走这里。
+ * 开启「取消框选后恢复实时」时，从「有区域」变成「无区域」且当前处于冻结状态，就自动恢复实时画面。
+ */
+function setRegion(v) {
+  const hadRegion = region.value != null
+  region.value = v
+  if (resumeOnClear.value && hadRegion && v == null && !imageMode.value && frozen.value) {
+    resumeLive()
+  }
+}
 const hoverText = ref('')
 /** 光标下的像素颜色（锚点取色模式下实时更新，用于悬停即按 C 复制） */
 const hoverColor = ref('')
