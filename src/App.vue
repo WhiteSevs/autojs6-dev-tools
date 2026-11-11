@@ -186,6 +186,8 @@
             :bitmap="displayBitmap"
             :meta="displayMeta"
             :region="region"
+            :offsets="mode === 'region' ? offsets : []"
+            :offset-picking="mode === 'region' && offsetPicking"
             :anchor="mode === 'color' ? anchor : null"
             :matches="mode === 'color' ? matches : []"
             :match-total="mode === 'color' ? findResult?.total || 0 : 0"
@@ -196,7 +198,9 @@
               imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
             "
             @update:region="(v) => (region = v)"
+            @update:offset-picking="(v) => (offsetPicking = v)"
             @pick="onPick"
+            @pick-offset="onPickOffset"
             @interact="freezeFrame"
             @resume="resumeLive"
             @request-original="ensureOriginal"
@@ -212,11 +216,15 @@
           <RegionPanel
             v-if="mode === 'region'"
             :region="region"
+            :offsets="offsets"
+            :picking="offsetPicking"
             :device-w="deviceW"
             :device-h="deviceH"
             :serial="activeSerial"
             :frame-id="displayMeta?.frameId"
             @update:region="(v) => (region = v)"
+            @update:offsets="(v) => (offsets = v)"
+            @update:picking="(v) => (offsetPicking = v)"
           />
           <ColorPanel
             v-else
@@ -297,6 +305,8 @@
         <span v-if="lastError" class="err-text">{{ lastError }}</span>
         <span style="margin-left: auto" v-if="region" class="mono">
           区域 [{{ region.x }}, {{ region.y }}, {{ region.w }}, {{ region.h }}]
+          <template v-if="offsetPicking"> · 取点中…</template>
+          <template v-else-if="offsets.length"> · 偏移 {{ offsets.length }} 个</template>
         </span>
       </footer>
     </div>
@@ -379,6 +389,9 @@ function toggleRail() {
   } catch {}
 }
 const region = ref(null)
+/* 中心点偏移：都以区域中心为原点，只存相对量，区域移动时偏移跟着走 */
+const offsets = ref([])
+const offsetPicking = ref(false)
 const anchor = ref(null)
 const searchColor = ref('')
 const threshold = ref(4)
@@ -719,6 +732,43 @@ async function onDrop(e) {
   const file = e.dataTransfer?.files?.[0]
   if (file) await loadImageFile(file)
 }
+
+/* ------------------------------ 区域中心点偏移 ------------------------------ */
+const MAX_OFFSETS = 20
+
+function regionCenter(r) {
+  return { x: Math.round(r.x + r.w / 2), y: Math.round(r.y + r.h / 2) }
+}
+
+/** 在画面上取一个点，换算成相对区域中心的偏移量 */
+function onPickOffset(pt) {
+  if (!region.value) return
+  if (offsets.value.length >= MAX_OFFSETS) {
+    ElMessage.warning(`最多添加 ${MAX_OFFSETS} 个偏移点`)
+    return
+  }
+  const c = regionCenter(region.value)
+  offsets.value = [
+    ...offsets.value,
+    {
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      dx: pt.x - c.x,
+      dy: pt.y - c.y,
+    },
+  ]
+}
+
+watch(region, (val) => {
+  // 区域被清掉后，偏移点失去参照基点，一起清空
+  if (!val) {
+    offsets.value = []
+    offsetPicking.value = false
+  }
+})
+
+watch(mode, (val) => {
+  if (val !== 'region') offsetPicking.value = false
+})
 
 /* ------------------------------ 取色与找色 ------------------------------ */
 async function onPick(pt) {

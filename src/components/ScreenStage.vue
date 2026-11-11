@@ -1,5 +1,5 @@
 <template>
-  <div ref="stageRef" class="stage" :class="[`mode-${mode}`, { dragging: !!drag }]">
+  <div ref="stageRef" class="stage" :class="[`mode-${mode}`, { dragging: !!drag, 'picking-offset': offsetPicking }]">
     <canvas
       ref="canvasRef"
       class="stage-canvas"
@@ -42,6 +42,19 @@
           <el-icon><Grid /></el-icon>
         </button>
       </el-tooltip>
+      <el-tooltip
+        v-if="mode === 'region' && region"
+        content="从区域中心添加偏移点（P）：取画面其它位置相对中心点的偏移量"
+        placement="bottom"
+      >
+        <button
+          class="icon-btn"
+          :class="{ active: offsetPicking }"
+          @click="$emit('update:offsetPicking', !offsetPicking)"
+        >
+          <el-icon><Pointer /></el-icon>
+        </button>
+      </el-tooltip>
       <el-tooltip content="缩小（-）" placement="bottom">
         <button class="icon-btn" @click="zoomBy(1 / 1.25)"><el-icon><ZoomOut /></el-icon></button>
       </el-tooltip>
@@ -81,13 +94,22 @@
     <!-- 底部操作提示 -->
     <div v-if="showToolbar" class="stage-hint">
       <template v-if="mode === 'region'">
-        <span><b>拖拽</b>框选区域</span>
-        <span class="dot">·</span>
-        <span>框内拖动可整体移动，拖动<b>边角</b>缩放</span>
-        <span class="dot">·</span>
-        <span><span class="kbd">↑↓←→</span> 微调 1px，<span class="kbd">Shift</span> 10px</span>
-        <span class="dot">·</span>
-        <span><span class="kbd">Ctrl</span>+<span class="kbd">S</span> 保存 / <span class="kbd">Ctrl</span>+<span class="kbd">C</span> 复制{{ region ? '区域图' : '整屏' }}</span>
+        <template v-if="offsetPicking">
+          <span><b>点击</b>画面取点，得到相对区域中心的偏移量</span>
+          <span class="dot">·</span>
+          <span>可连续点多个位置</span>
+          <span class="dot">·</span>
+          <span><span class="kbd">Esc</span> / <span class="kbd">P</span> 结束取点</span>
+        </template>
+        <template v-else>
+          <span><b>拖拽</b>框选区域</span>
+          <span class="dot">·</span>
+          <span>框内拖动可整体移动，拖动<b>边角</b>缩放</span>
+          <span class="dot">·</span>
+          <span><span class="kbd">↑↓←→</span> 微调 1px，<span class="kbd">Shift</span> 10px</span>
+          <span class="dot">·</span>
+          <span><span class="kbd">Ctrl</span>+<span class="kbd">S</span> 保存 / <span class="kbd">Ctrl</span>+<span class="kbd">C</span> 复制{{ region ? '区域图' : '整屏' }}</span>
+        </template>
       </template>
       <template v-else>
         <span><b>移动</b>查看放大镜，<b>单击</b>拾取锚点颜色</span>
@@ -118,6 +140,8 @@ const props = defineProps({
   meta: { type: Object, default: null },
   mode: { type: String, default: 'region' },
   region: { type: Object, default: null },
+  offsets: { type: Array, default: () => [] },
+  offsetPicking: { type: Boolean, default: false },
   anchor: { type: Object, default: null },
   matches: { type: Array, default: () => [] },
   matchTotal: { type: Number, default: 0 },
@@ -133,8 +157,10 @@ const emit = defineEmits([
   'update:mode',
   'update:panMode',
   'update:region',
+  'update:offsetPicking',
   'update:showToolbar',
   'pick',
+  'pick-offset',
   'interact',
   'resume',
   'hover',
@@ -305,13 +331,16 @@ function render() {
 
   if (showGrid.value) drawGrid(o)
 
-  if (props.region) drawRegion(props.region)
+  if (props.region) drawRegion(props.region, !props.offsetPicking)
+  if (props.region && props.offsets?.length) drawOffsets(props.region, props.offsets)
+  if (props.region && props.offsetPicking) drawPickPreview(props.region)
   if (props.matches?.length) drawMatches()
   if (props.anchor) drawAnchor(props.anchor)
 
   if (props.mode === 'color' && hoverDev.value) drawLoupe()
 
-  if (props.mode === 'region' && !props.region && !props.frozen) drawCrosshair()
+  // 取点时也要十字线：此时画面常被冻结，但取点仍需要精确对位
+  if (props.mode === 'region' && (props.offsetPicking || (!props.region && !props.frozen))) drawCrosshair()
 }
 
 function drawGrid(o) {
@@ -351,18 +380,21 @@ function drawGrid(o) {
   ctx.restore()
 }
 
-function drawRegion(region) {
+function drawRegion(region, dim = true) {
   const [x1, y1] = devToScreen(region.x, region.y)
   const w = region.w * scale.value
   const h = region.h * scale.value
 
-  ctx.save()
-  ctx.beginPath()
-  ctx.rect(origin.value.x, origin.value.y, origin.value.dw, origin.value.dh)
-  ctx.rect(x1, y1, w, h)
-  ctx.fillStyle = 'rgba(8,15,30,0.42)'
-  ctx.fill('evenodd')
-  ctx.restore()
+  // 取点时取消区域外压暗，方便看清并精确点选区域外的位置
+  if (dim) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(origin.value.x, origin.value.y, origin.value.dw, origin.value.dh)
+    ctx.rect(x1, y1, w, h)
+    ctx.fillStyle = 'rgba(8,15,30,0.42)'
+    ctx.fill('evenodd')
+    ctx.restore()
+  }
 
   ctx.save()
   ctx.strokeStyle = '#0EA5A0'
@@ -415,6 +447,87 @@ function drawRegion(region) {
     ctx.stroke()
   }
   ctx.restore()
+}
+
+/** 相对区域中心的偏移点：从中心拉一条虚线到目标点，标注 Δx / Δy */
+function drawOffsets(region, list) {
+  const cx = region.x + region.w / 2
+  const cy = region.y + region.h / 2
+  const [ox, oy] = devToScreen(cx, cy)
+
+  // 原点（区域中心）外圈，表明偏移的计量起点
+  ctx.save()
+  ctx.strokeStyle = 'rgba(124,58,237,0.85)'
+  ctx.lineWidth = 1.5
+  ctx.setLineDash([3, 3])
+  ctx.beginPath()
+  ctx.arc(ox, oy, 11, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.restore()
+
+  list.forEach((p, i) => {
+    const [sx, sy] = devToScreen(cx + p.dx, cy + p.dy)
+
+    ctx.save()
+    ctx.strokeStyle = 'rgba(124,58,237,0.7)'
+    ctx.lineWidth = 1.2
+    ctx.setLineDash([5, 4])
+    ctx.beginPath()
+    ctx.moveTo(ox, oy)
+    ctx.lineTo(sx, sy)
+    ctx.stroke()
+    ctx.restore()
+
+    ctx.save()
+    ctx.strokeStyle = '#7C3AED'
+    ctx.fillStyle = 'rgba(255,255,255,0.94)'
+    ctx.lineWidth = 1.6
+    ctx.beginPath()
+    ctx.arc(sx, sy, 6, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(sx - 10, sy)
+    ctx.lineTo(sx + 10, sy)
+    ctx.moveTo(sx, sy - 10)
+    ctx.lineTo(sx, sy + 10)
+    ctx.stroke()
+    ctx.restore()
+
+    const label = `P${i + 1}  Δ${signed(p.dx)}, ${signed(p.dy)}`
+    drawChip(sx + 12, sy - 26 >= 4 ? sy - 26 : sy + 12, label, { bg: 'rgba(109,40,217,0.94)', color: '#fff' })
+  })
+}
+
+/** 取点过程中的实时预览：中心 → 光标 */
+function drawPickPreview(region) {
+  if (!hoverDev.value) return
+  const cx = region.x + region.w / 2
+  const cy = region.y + region.h / 2
+  const [ox, oy] = devToScreen(cx, cy)
+  const [sx, sy] = devToScreen(hoverDev.value.x + 0.5, hoverDev.value.y + 0.5)
+  const dx = hoverDev.value.x - Math.round(cx)
+  const dy = hoverDev.value.y - Math.round(cy)
+
+  ctx.save()
+  ctx.strokeStyle = 'rgba(124,58,237,0.9)'
+  ctx.lineWidth = 1.4
+  ctx.setLineDash([4, 4])
+  ctx.beginPath()
+  ctx.moveTo(ox, oy)
+  ctx.lineTo(sx, sy)
+  ctx.stroke()
+  ctx.restore()
+
+  // 光标正好压在已有点上时不再叠一个数值气泡，避免两个标签打架
+  const tooClose = props.offsets.some((p) => Math.abs(p.dx - dx) < 8 && Math.abs(p.dy - dy) < 8)
+  if (tooClose) return
+
+  drawChip(sx + 12, sy + 12, `Δ${signed(dx)}, ${signed(dy)}`, { bg: 'rgba(109,40,217,0.92)', color: '#fff' })
+}
+
+function signed(v) {
+  return v > 0 ? `+${v}` : String(v)
 }
 
 function handlePositions(r) {
@@ -679,6 +792,13 @@ function onPointerDown(ev) {
     return
   }
 
+  // 取点模式：点击只记录相对中心的偏移，不改动区域本身
+  if (props.mode === 'region' && props.offsetPicking) {
+    emit('interact')
+    emit('pick-offset', { x: Math.round(dev.x), y: Math.round(dev.y) })
+    return
+  }
+
   emit('interact')
   const sx = pt.x
   const sy = pt.y
@@ -747,6 +867,8 @@ function onPointerMove(ev) {
   const canvas = canvasRef.value
   if (props.panMode) {
     canvas.style.cursor = 'grab'
+  } else if (props.offsetPicking) {
+    canvas.style.cursor = 'crosshair'
   } else if (props.mode === 'color') {
     canvas.style.cursor = 'crosshair'
   } else if (hitHandle(pt.x, pt.y)) {
@@ -861,11 +983,22 @@ function onKeyDown(ev) {
     return
   }
   if (ev.key === 'Escape') {
+    if (props.offsetPicking) {
+      emit('update:offsetPicking', false)
+      return
+    }
     if (props.mode === 'region') emit('update:region', null)
     return
   }
   if (ev.key === 'Delete' || ev.key === 'Backspace') {
     if (props.mode === 'region') emit('update:region', null)
+  }
+  if (ev.key === 'p' || ev.key === 'P') {
+    if (props.mode === 'region' && props.region) {
+      ev.preventDefault()
+      emit('update:offsetPicking', !props.offsetPicking)
+    }
+    return
   }
   if (ev.key === 'r' || ev.key === 'R') {
     emit('resume')
@@ -955,7 +1088,7 @@ watch(
   { immediate: true },
 )
 
-watch(() => [props.mode, props.region, props.anchor, props.matches, props.bbox, props.frozen], schedule, { deep: true })
+watch(() => [props.mode, props.region, props.anchor, props.matches, props.bbox, props.frozen, props.offsets, props.offsetPicking], schedule, { deep: true })
 watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
 </script>
 
@@ -976,6 +1109,10 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
 }
 
 .stage.mode-color .stage-canvas {
+  cursor: crosshair;
+}
+
+.stage.picking-offset .stage-canvas {
   cursor: crosshair;
 }
 
