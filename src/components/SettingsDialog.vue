@@ -47,7 +47,7 @@
           <div class="set-text">
             <div class="set-label">坐标格式</div>
             <div class="set-desc">
-              区域框选时按 C 复制光标当前坐标：未框选 w / h 为 0，框选后带真实宽高；Shift 只切换带不带方括号
+              区域框选时按 C 复制光标当前坐标：未框选 w / h 为 0，框选后带真实宽高；Shift 循环切换
             </div>
           </div>
           <el-select
@@ -56,8 +56,47 @@
             class="fmt-select"
             @update:model-value="(v) => emit('update:coordFormat', v)"
           >
-            <el-option v-for="f in COORD_FORMATS" :key="f.key" :label="`${f.label} · ${f.example}`" :value="f.key" />
+            <el-option
+              v-for="f in COORD_FORMATS"
+              :key="f.key"
+              :label="f.example ? `${f.label} · ${f.example}` : f.label"
+              :value="f.key"
+            />
           </el-select>
+        </div>
+
+        <div v-if="coordFormatKey === 'custom'" class="set-block">
+          <div class="set-text">
+            <div class="set-label">自定义模板</div>
+            <div class="set-desc">
+              在这里写出要复制的代码，占位符会替换成实际数值，原样输出（不会执行）：
+              <span class="ph-list">
+                <span v-for="p in COORD_PLACEHOLDERS" :key="p.key" class="ph mono" :title="p.desc">{{ p.key }}</span>
+              </span>
+            </div>
+          </div>
+          <el-input
+            :model-value="coordTemplate"
+            type="textarea"
+            :rows="2"
+            resize="none"
+            class="tpl-input"
+            placeholder="在此填写坐标模板…"
+            @update:model-value="(v) => emit('update:coordTemplate', v)"
+          />
+          <div class="tpl-foot">
+            <span v-if="!coordTemplate" class="tpl-hint">模板为空时按 C 不会复制任何内容</span>
+            <span v-else class="tpl-hint">按 C 会按此模板复制</span>
+            <el-button
+              v-if="coordTemplate"
+              link
+              size="small"
+              type="primary"
+              @click="emit('update:coordTemplate', '')"
+            >
+              清空
+            </el-button>
+          </div>
         </div>
 
         <div class="about-box">
@@ -100,21 +139,29 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { COLOR_FORMATS } from '../utils/color'
-import { COORD_FORMATS } from '../utils/coord'
+import {
+  COORD_FORMATS,
+  COORD_PLACEHOLDERS,
+  DEFAULT_COORD_TEMPLATE,
+  normalizeCoordFormat,
+} from '../utils/coord'
 
-defineProps({
+const props = defineProps({
   modelValue: { type: Boolean, default: false },
   toolbar: { type: Boolean, default: true },
   colorFormat: { type: String, default: 'hex' },
-  coordFormat: { type: String, default: 'region' },
+  coordFormat: { type: String, default: 'bracket' },
+  coordTemplate: { type: String, default: DEFAULT_COORD_TEMPLATE },
   env: { type: Object, default: null },
 })
 
-const emit = defineEmits(['update:modelValue', 'update:toolbar', 'update:colorFormat', 'update:coordFormat'])
+const emit = defineEmits(['update:modelValue', 'update:toolbar', 'update:colorFormat', 'update:coordFormat', 'update:coordTemplate'])
 
 const tab = ref('general')
+
+const coordFormatKey = computed(() => normalizeCoordFormat(props.coordFormat))
 
 const SHORTCUTS = [
   {
@@ -142,7 +189,7 @@ const SHORTCUTS = [
       { keys: ['Shift', '↑ ↓ ← →'], desc: '区域微调 10px' },
       { keys: ['P'], desc: '开始 / 结束中心点偏移取点' },
       { keys: ['C'], desc: '复制光标当前坐标：未框选为 [x, y, 0, 0]，框选后带上真实 w / h' },
-      { keys: ['Shift'], desc: '切换坐标格式：带括号 [x, y, w, h] / 不带括号 x, y, w, h' },
+      { keys: ['Shift'], desc: '切换坐标格式：带括号 [x, y, w, h] / 不带括号 x, y, w, h / 自定义模板' },
       { keys: ['Esc'], desc: '结束取点，或清除当前区域' },
       { keys: ['Delete'], desc: '清除当前区域' },
     ],
@@ -241,6 +288,60 @@ const SHORTCUTS = [
 .fmt-select {
   width: 168px;
   flex: 0 0 168px;
+}
+
+/* 自定义坐标模板 */
+.set-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  background: #fbfcfe;
+}
+
+.ph-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ph {
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  background: #eef8f8;
+  color: #0b8480;
+  border: 1px solid #d5eeed;
+  cursor: help;
+}
+
+.tpl-input :deep(.el-textarea__inner) {
+  font-family: var(--app-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.tpl-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: #94a3b8;
+  min-width: 0;
+}
+
+.tpl-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cbd5e1;
 }
 
 .about-box {

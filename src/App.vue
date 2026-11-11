@@ -327,10 +327,12 @@
       :toolbar="showToolbar"
       :color-format="colorFormat"
       :coord-format="coordFormat"
+      :coord-template="coordTemplate"
       :env="env"
       @update:toolbar="setToolbarDefault"
       @update:color-format="setColorFormat"
       @update:coord-format="setCoordFormat"
+      @update:coord-template="setCoordTemplate"
     />
   </div>
 </template>
@@ -347,11 +349,13 @@ import { useStream } from './composables/useStream'
 import { api, copyImageToClipboard, copyText, downloadBlob, shotBlob } from './api'
 import { formatColor, formatExample, nextFormat, normalizeFormat } from './utils/color'
 import {
+  DEFAULT_COORD_TEMPLATE,
   coordFormatExample,
   coordFormatLabel,
   formatCoord,
   nextCoordFormat,
   normalizeCoordFormat,
+  normalizeCoordTemplate,
 } from './utils/coord'
 
 /** 帧率由高到低排列，默认最高帧率 */
@@ -375,6 +379,7 @@ const railCollapsed = ref(readRailState())
 const settingsOpen = ref(false)
 const colorFormat = ref(readColorFormat())
 const coordFormat = ref(readCoordFormat())
+const coordTemplate = ref(readCoordTemplate())
 
 /* 数据源：设备 / 本地图片 */
 const imageMode = ref(false)
@@ -437,9 +442,25 @@ function readColorFormat() {
 
 function readCoordFormat() {
   try {
-    return normalizeCoordFormat(localStorage.getItem('autojs6.coordFormat') || 'region')
+    return normalizeCoordFormat(localStorage.getItem('autojs6.coordFormat') || 'bracket')
   } catch {
-    return 'region'
+    return 'bracket'
+  }
+}
+
+function readCoordTemplate() {
+  try {
+    const saved = localStorage.getItem('autojs6.coordTemplate')
+    // 只做一次迁移：早期版本预置过示例模板，之后用户手写的同款模板不再被清掉
+    if (localStorage.getItem('autojs6.coordTemplateMigrated') !== '1') {
+      const tpl = normalizeCoordTemplate(saved || DEFAULT_COORD_TEMPLATE)
+      if (saved !== null && saved !== tpl) localStorage.setItem('autojs6.coordTemplate', tpl)
+      localStorage.setItem('autojs6.coordTemplateMigrated', '1')
+      return tpl
+    }
+    return saved ?? DEFAULT_COORD_TEMPLATE
+  } catch {
+    return DEFAULT_COORD_TEMPLATE
   }
 }
 
@@ -461,6 +482,13 @@ function setCoordFormat(v) {
   coordFormat.value = normalizeCoordFormat(v)
   try {
     localStorage.setItem('autojs6.coordFormat', coordFormat.value)
+  } catch {}
+}
+
+function setCoordTemplate(v) {
+  coordTemplate.value = String(v ?? '')
+  try {
+    localStorage.setItem('autojs6.coordTemplate', coordTemplate.value)
   } catch {}
 }
 
@@ -839,17 +867,28 @@ async function copyHoverCoord() {
     return
   }
   const size = region.value ? { w: region.value.w, h: region.value.h } : null
-  const text = formatCoord(hoverCoord.value, coordFormat.value, size)
-  if (!text) return
+  const text = formatCoord(hoverCoord.value, coordFormat.value, size, coordTemplate.value)
+  if (!text) {
+    if (coordFormat.value === 'custom') ElMessage.info('自定义模板为空，请到「设置 → 通用」里填写')
+    return
+  }
   const ok = await copyText(text)
   ok ? ElMessage.success(`已复制 ${text}`) : ElMessage.error('复制失败')
 }
 
 function cycleCoordFormat() {
   setCoordFormat(nextCoordFormat(coordFormat.value))
+  const label = coordFormatLabel(coordFormat.value)
+  if (coordFormat.value === 'custom' && !coordTemplate.value.trim()) {
+    ElMessage.info('已切到自定义模板，请到「设置 → 通用」里填写')
+    return
+  }
   const size = region.value ? { w: region.value.w, h: region.value.h } : null
-  const sample = formatCoord(hoverCoord.value, coordFormat.value, size) || coordFormatExample(coordFormat.value)
-  ElMessage.info(`坐标格式（${coordFormatLabel(coordFormat.value)}）：${sample}`)
+  const sample =
+    formatCoord(hoverCoord.value, coordFormat.value, size, coordTemplate.value) ||
+    coordFormatExample(coordFormat.value, coordTemplate.value)
+  const short = sample.length > 60 ? `${sample.slice(0, 60)}…` : sample
+  ElMessage.info(sample ? `坐标格式（${label}）：${short}` : `坐标格式：${label}`)
 }
 
 /** Shift 单独按下再松开才切换格式，避免 Shift + 方向键微调时误触发 */
