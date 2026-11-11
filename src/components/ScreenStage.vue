@@ -167,6 +167,7 @@ const emit = defineEmits([
   'resume',
   'hover',
   'request-original',
+  'clear-region',
 ])
 
 const stageRef = ref(null)
@@ -1044,11 +1045,11 @@ function onKeyDown(ev) {
       emit('update:offsetPicking', false)
       return
     }
-    if (props.mode === 'region') emit('update:region', null)
+    if (props.mode === 'region') emit('clear-region')
     return
   }
   if (ev.key === 'Delete' || ev.key === 'Backspace') {
-    if (props.mode === 'region') emit('update:region', null)
+    if (props.mode === 'region') emit('clear-region')
   }
   if (ev.key === 'p' || ev.key === 'P') {
     if (props.mode === 'region' && props.region) {

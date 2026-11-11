@@ -196,6 +196,7 @@
               imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
             "
             @update:region="setRegion"
+            @clear-region="clearRegion"
             @update:offset-picking="(v) => (offsetPicking = v)"
             @pick="onPick"
             @pick-offset="onPickOffset"
@@ -221,6 +222,7 @@
             :serial="activeSerial"
             :frame-id="displayMeta?.frameId"
             @update:region="setRegion"
+            @clear-region="clearRegion"
             @update:offsets="(v) => (offsets = v)"
             @update:picking="(v) => (offsetPicking = v)"
           />
@@ -531,13 +533,20 @@ const frozen = ref(false)
 const frozenReason = ref('')
 
 /**
- * 统一的区域更新入口：ScreenStage（拖拽 / Esc / Delete）与 RegionPanel（清空 / 全屏）都走这里。
- * 开启「取消框选后恢复实时」时，从「有区域」变成「无区域」且当前处于冻结状态，就自动恢复实时画面。
+ * 区域更新入口：ScreenStage 拖拽 / 全屏按钮 / 取点都走这里（不含「取消框选」，
+ * 取消走 clearRegion）。这里只做赋值，不做自动恢复，避免「重新框选」时误触发。
  */
 function setRegion(v) {
-  const hadRegion = region.value != null
   region.value = v
-  if (resumeOnClear.value && hadRegion && v == null && !imageMode.value && frozen.value) {
+}
+
+/**
+ * 取消框选（Esc / Delete / 右侧「清空」按钮）：
+ * 开启「取消框选后恢复实时」且当前处于冻结状态时，自动恢复实时画面。
+ */
+function clearRegion() {
+  region.value = null
+  if (resumeOnClear.value && !imageMode.value && frozen.value) {
     resumeLive()
   }
 }

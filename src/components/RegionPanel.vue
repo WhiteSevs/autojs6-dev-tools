@@ -123,7 +123,7 @@
         <el-button size="small" @click="emit('update:region', { x: 0, y: 0, w: deviceW, h: deviceH })">
           全屏
         </el-button>
-        <el-button size="small" @click="emit('update:region', null)">清空</el-button>
+        <el-button size="small" @click="emit('clear-region')">清空</el-button>
         <el-button size="small" type="primary" plain @click="copyArray">
           <el-icon><CopyDocument /></el-icon>&nbsp;复制坐标
         </el-button>
@@ -170,7 +170,7 @@ const props = defineProps({
   frameId: { type: Number, default: null },
 })
 
-const emit = defineEmits(['update:region', 'update:offsets', 'update:picking'])
+const emit = defineEmits(['update:region', 'update:offsets', 'update:picking', 'clear-region'])
 const saving = ref('')
 
 const center = computed(() =>
