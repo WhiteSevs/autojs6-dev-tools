@@ -964,8 +964,9 @@ function onPointerUp(ev) {
   if (drag.value) {
     const d = drag.value
     drag.value = null
-    if (d.type === 'new' && props.region && props.region.w < 3 && props.region.h < 3) {
-      emit('update:region', null)
+    // 没有拖出有效区域（纯点击 / 极小拖拽）＝取消框选，走 clear-region，让 App 按设置决定是否恢复实时
+    if (d.type === 'new' && (!props.region || (props.region.w < 3 && props.region.h < 3))) {
+      emit('clear-region')
     }
     schedule()
   }
