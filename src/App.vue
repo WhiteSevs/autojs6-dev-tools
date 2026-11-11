@@ -22,16 +22,12 @@
       <div class="hb-group">
         <span class="topbar-label hb-title">数据源</span>
         <div class="hb-seg">
-          <el-tooltip content="实时抓取 ADB 设备屏幕" :placement="tipPlacement">
-            <button :class="{ active: !imageMode }" @click="setSource('device')">
-              <el-icon><Iphone /></el-icon><span class="btn-text">设备</span>
-            </button>
-          </el-tooltip>
-          <el-tooltip content="用本地图片做坐标与取色（也可把图片拖到画面上）" :placement="tipPlacement">
-            <button :class="{ active: imageMode }" @click="setSource('image')">
-              <el-icon><Picture /></el-icon><span class="btn-text">图片</span>
-            </button>
-          </el-tooltip>
+          <button :class="{ active: !imageMode }" @click="setSource('device')">
+            <el-icon><Iphone /></el-icon><span class="btn-text">设备</span>
+          </button>
+          <button :class="{ active: imageMode }" @click="setSource('image')">
+            <el-icon><Picture /></el-icon><span class="btn-text">图片</span>
+          </button>
         </div>
       </div>
 
@@ -133,23 +129,19 @@
 
             <div class="hb-field">
               <label>帧率</label>
-              <el-tooltip content="目标刷新率，实际帧率受设备截屏速度限制" :placement="tipPlacement">
-                <el-select v-model="fps" class="fps-select" size="small">
-                  <el-option v-for="v in [1, 2, 3, 5, 8]" :key="v" :label="`${v} fps`" :value="v" />
-                </el-select>
-              </el-tooltip>
+              <el-select v-model="fps" class="fps-select" size="small">
+                <el-option v-for="v in FPS_OPTIONS" :key="v" :label="`${v} fps`" :value="v" />
+              </el-select>
             </div>
 
             <div class="hb-field">
               <label>画质</label>
-              <el-tooltip content="原画 = 1:1 设备像素（最高精度，流量最大）" :placement="tipPlacement">
-                <el-select v-model="scale" class="scale-select" size="small">
-                  <el-option label="原画 1:1" :value="1" />
-                  <el-option label="高清" :value="2" />
-                  <el-option label="标准" :value="3" />
-                  <el-option label="流畅" :value="4" />
-                </el-select>
-              </el-tooltip>
+              <el-select v-model="scale" class="scale-select" size="small">
+                <el-option label="原画 1:1" :value="1" />
+                <el-option label="高清" :value="2" />
+                <el-option label="标准" :value="3" />
+                <el-option label="流畅" :value="4" />
+              </el-select>
             </div>
           </div>
         </div>
@@ -165,6 +157,11 @@
           <el-icon class="help-dot"><InfoFilled /></el-icon>
         </el-tooltip>
       </div>
+
+      <button class="settings-btn" @click="settingsOpen = true">
+        <el-icon><Setting /></el-icon>
+        <span class="btn-text">设置</span>
+      </button>
     </header>
 
     <input ref="fileInputRef" type="file" accept="image/*" class="hidden-file" @change="onFileChange" />
@@ -193,6 +190,7 @@
             :match-total="mode === 'color' ? findResult?.total || 0 : 0"
             :bbox="mode === 'color' ? bbox : null"
             :frozen="frozen && !imageMode"
+            :color-format="colorFormat"
             :empty-title="imageMode ? '还没有载入图片' : '等待画面…'"
             :empty-desc="
               imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
@@ -204,7 +202,7 @@
             @interact="freezeFrame"
             @resume="resumeLive"
             @request-original="ensureOriginal"
-            @hover="(v) => (hoverText = v ? `${v.x}, ${v.y}` : '')"
+            @hover="onHover"
           />
           <div v-if="dragOver" class="drop-mask">
             <el-icon :size="30"><PictureFilled /></el-icon>
@@ -235,9 +233,11 @@
             :has-region="!!region"
             :result="findResult"
             :loading="finding"
+            :format="colorFormat"
             @update:color="(v) => (searchColor = v)"
             @update:threshold="onThreshold"
             @update:restrict="onRestrict"
+            @update:format="setColorFormat"
             @find="runFind"
             @clear="clearAnchor"
           />
@@ -287,9 +287,20 @@
 
       <!-- 状态栏 -->
       <footer class="statusbar">
-        <span>
+        <span class="status-main">
           <span class="status-dot" :class="statusDotClass" />
           <b>{{ statusText }}</b>
+          <button
+            v-if="frozen && !imageMode"
+            class="status-action"
+            :class="{ danger: frozenReason === 'lost' }"
+            @click="onFreezeAction"
+          >
+            <el-icon>
+              <component :is="frozenReason === 'lost' ? 'RefreshRight' : 'VideoPlay'" />
+            </el-icon>
+            {{ frozenReason === 'lost' ? '重连设备' : '恢复实时' }}
+          </button>
         </span>
         <span v-if="env?.version">{{ env.version }}</span>
         <span v-if="!imageMode && serial">serial <b class="mono">{{ serial }}</b></span>
@@ -310,6 +321,17 @@
         </span>
       </footer>
     </div>
+
+    <SettingsDialog
+      v-model="settingsOpen"
+      :toolbar="showToolbar"
+      :color-format="colorFormat"
+      :coord-format="coordFormat"
+      :env="env"
+      @update:toolbar="setToolbarDefault"
+      @update:color-format="setColorFormat"
+      @update:coord-format="setCoordFormat"
+    />
   </div>
 </template>
 
@@ -320,11 +342,23 @@ import ScreenStage from './components/ScreenStage.vue'
 import RegionPanel from './components/RegionPanel.vue'
 import ColorPanel from './components/ColorPanel.vue'
 import DevicePanel from './components/DevicePanel.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 import { useStream } from './composables/useStream'
-import { api, copyImageToClipboard, downloadBlob, shotBlob } from './api'
+import { api, copyImageToClipboard, copyText, downloadBlob, shotBlob } from './api'
+import { formatColor, formatExample, nextFormat, normalizeFormat } from './utils/color'
+import {
+  coordFormatExample,
+  coordFormatLabel,
+  formatCoord,
+  nextCoordFormat,
+  normalizeCoordFormat,
+} from './utils/coord'
+
+/** 帧率由高到低排列，默认最高帧率 */
+const FPS_OPTIONS = [8, 5, 3, 2, 1]
 
 const stream = useStream()
-const { bitmap, meta, ready, paused, error: streamError } = stream
+const { bitmap, meta, ready, paused, error: streamError, lost: streamLost } = stream
 
 const env = ref(null)
 const devices = ref([])
@@ -336,8 +370,11 @@ const connectAddr = ref('')
 
 const mode = ref('region')
 const panMode = ref(false)
-const showToolbar = ref(true)
+const showToolbar = ref(readToolbarDefault())
 const railCollapsed = ref(readRailState())
+const settingsOpen = ref(false)
+const colorFormat = ref(readColorFormat())
+const coordFormat = ref(readCoordFormat())
 
 /* 数据源：设备 / 本地图片 */
 const imageMode = ref(false)
@@ -382,6 +419,51 @@ function readRailState() {
   }
 }
 
+function readToolbarDefault() {
+  try {
+    return localStorage.getItem('autojs6.showToolbar') !== '0'
+  } catch {
+    return true
+  }
+}
+
+function readColorFormat() {
+  try {
+    return normalizeFormat(localStorage.getItem('autojs6.colorFormat') || 'hex')
+  } catch {
+    return 'hex'
+  }
+}
+
+function readCoordFormat() {
+  try {
+    return normalizeCoordFormat(localStorage.getItem('autojs6.coordFormat') || 'region')
+  } catch {
+    return 'region'
+  }
+}
+
+function setToolbarDefault(v) {
+  showToolbar.value = v
+  try {
+    localStorage.setItem('autojs6.showToolbar', v ? '1' : '0')
+  } catch {}
+}
+
+function setColorFormat(v) {
+  colorFormat.value = normalizeFormat(v)
+  try {
+    localStorage.setItem('autojs6.colorFormat', colorFormat.value)
+  } catch {}
+}
+
+function setCoordFormat(v) {
+  coordFormat.value = normalizeCoordFormat(v)
+  try {
+    localStorage.setItem('autojs6.coordFormat', coordFormat.value)
+  } catch {}
+}
+
 function toggleRail() {
   railCollapsed.value = !railCollapsed.value
   try {
@@ -399,10 +481,16 @@ const restrict = ref(false)
 const findResult = ref(null)
 const finding = ref(false)
 const frozen = ref(false)
+/** '' | 'manual'（手动冻结） | 'lost'（设备断开，自动冻结并保留最后一帧） */
+const frozenReason = ref('')
 const hoverText = ref('')
+/** 光标下的像素颜色（锚点取色模式下实时更新，用于悬停即按 C 复制） */
+const hoverColor = ref('')
+/** 光标下的设备坐标（区域框选模式下按 C 复制用） */
+const hoverCoord = ref(null)
 const lastError = ref('')
 
-const fps = ref(2)
+const fps = ref(FPS_OPTIONS[0])
 const scale = ref(1)
 
 const adbOk = computed(() => !!env.value?.ok)
@@ -415,6 +503,7 @@ const statusText = computed(() => {
   if (imageMode.value) {
     return imageInfo.value ? `图片模式 · ${imageInfo.value.name}` : '图片模式 · 未载入图片'
   }
+  if (frozenReason.value === 'lost') return '设备已断开 · 已冻结最后一帧'
   if (streamError.value) return streamError.value
   if (!adbOk.value) return '未检测到 adb'
   if (!serial.value) return '未选择设备'
@@ -425,6 +514,7 @@ const statusText = computed(() => {
 
 const statusDotClass = computed(() => {
   if (imageMode.value) return imageInfo.value ? 'on' : 'warn'
+  if (frozenReason.value === 'lost') return 'err'
   if (streamError.value || !adbOk.value) return 'err'
   if (frozen.value) return 'warn'
   return ready.value ? 'on' : ''
@@ -483,13 +573,47 @@ async function loadInfo() {
 function freezeFrame() {
   if (frozen.value) return
   frozen.value = true
+  frozenReason.value = 'manual'
   stream.pause()
 }
 
 function resumeLive() {
+  // 掉线状态下的「恢复实时」其实应该是重连，画面要等第一帧回来才解冻
+  if (streamLost.value) {
+    retryStream()
+    return
+  }
   frozen.value = false
+  frozenReason.value = ''
   stream.resume()
   stream.refreshNow()
+}
+
+/** 状态栏上的「恢复实时 / 重连设备」按钮 */
+function onFreezeAction() {
+  if (frozenReason.value === 'lost') retryStream()
+  else resumeLive()
+}
+
+/** 设备断开后点状态栏按钮 / 切回实时：重连设备，第一帧回来会自动解冻 */
+function retryStream() {
+  if (imageMode.value || !serial.value) return
+  ElMessage.info('正在重新连接设备…')
+  refreshDevices()
+  stream.connect({ serial: serial.value, fps: fps.value, scale: scale.value })
+}
+
+/** 光标移动：同步坐标，并记住光标下的颜色（锚点取色模式下才有） */
+function onHover(pt) {
+  if (!pt) {
+    hoverText.value = ''
+    hoverColor.value = ''
+    hoverCoord.value = null
+    return
+  }
+  hoverText.value = `${pt.x}, ${pt.y}`
+  hoverColor.value = pt.hex || ''
+  hoverCoord.value = { x: pt.x, y: pt.y }
 }
 
 function clearAnchor() {
@@ -558,6 +682,7 @@ async function loadImageFile(file) {
     imageInfo.value = { name: up.name, width: up.width, height: up.height, size: file.size }
     imageMode.value = true
     frozen.value = false
+    frozenReason.value = ''
     streamError.value = ''
     stream.close()
     region.value = null
@@ -680,32 +805,117 @@ async function copyCurrentShot() {
   }
 }
 
-function onGlobalKeydown(e) {
-  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
-  const key = String(e.key || '').toLowerCase()
+function isTypingTarget(el) {
+  const tag = el?.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable
+}
 
-  if (key === 's') {
-    e.preventDefault()
-    saveCurrentShot()
+/** 当前要复制/展示的颜色：优先光标下的像素，其次锚点（没拾取过锚点也能用） */
+function pickableColor() {
+  if (mode.value === 'color' && hoverColor.value) return hoverColor.value
+  return searchColor.value || anchor.value?.hex || ''
+}
+
+/** C：复制当前颜色（悬停中的像素，或已拾取的锚点），格式跟设置一致 */
+async function copyPickColor() {
+  const color = pickableColor()
+  if (!color) return
+  const text = formatColor(color, colorFormat.value)
+  if (!text) return
+  const ok = await copyText(text)
+  ok ? ElMessage.success(`已复制 ${text}`) : ElMessage.error('复制失败')
+}
+
+function cycleColorFormat() {
+  setColorFormat(nextFormat(colorFormat.value))
+  const sample = formatColor(pickableColor(), colorFormat.value) || formatExample(colorFormat.value)
+  ElMessage.info(`颜色格式：${sample}`)
+}
+
+/** C（区域框选模式）：复制光标当前坐标；已框选时带上 w / h，未框选则为 0 */
+async function copyHoverCoord() {
+  if (!hoverCoord.value) {
+    ElMessage.info('把鼠标移到画面上再按 C 复制坐标')
+    return
+  }
+  const size = region.value ? { w: region.value.w, h: region.value.h } : null
+  const text = formatCoord(hoverCoord.value, coordFormat.value, size)
+  if (!text) return
+  const ok = await copyText(text)
+  ok ? ElMessage.success(`已复制 ${text}`) : ElMessage.error('复制失败')
+}
+
+function cycleCoordFormat() {
+  setCoordFormat(nextCoordFormat(coordFormat.value))
+  const size = region.value ? { w: region.value.w, h: region.value.h } : null
+  const sample = formatCoord(hoverCoord.value, coordFormat.value, size) || coordFormatExample(coordFormat.value)
+  ElMessage.info(`坐标格式（${coordFormatLabel(coordFormat.value)}）：${sample}`)
+}
+
+/** Shift 单独按下再松开才切换格式，避免 Shift + 方向键微调时误触发 */
+let shiftAlone = false
+
+function onGlobalKeydown(e) {
+  if (e.key === 'Shift') {
+    shiftAlone = true
+    return
+  }
+  if (shiftAlone) shiftAlone = false
+  if (isTypingTarget(document.activeElement)) return
+
+  const key = String(e.key || '').toLowerCase()
+  const mod = e.ctrlKey || e.metaKey
+
+  if (mod && !e.altKey && !e.shiftKey) {
+    if (key === 's') {
+      e.preventDefault()
+      saveCurrentShot()
+      return
+    }
+    if (key === 'c') {
+      // 已选中文字时交还给浏览器默认的复制
+      const hasSelection = (window.getSelection()?.toString() || '').length > 0
+      if (hasSelection) return
+      e.preventDefault()
+      copyCurrentShot()
+    }
     return
   }
 
-  if (key === 'c') {
-    // 正在编辑文本或已选中文字时，交还给浏览器默认的复制
-    const el = document.activeElement
-    const tag = el?.tagName
-    const editable = tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable
-    const hasSelection = (window.getSelection()?.toString() || '').length > 0
-    if (editable || hasSelection) return
-    e.preventDefault()
-    copyCurrentShot()
+  if (!mod && !e.altKey && !e.shiftKey && key === 'c') {
+    // 选中了文字就先让浏览器正常复制，别抢
+    if ((window.getSelection()?.toString() || '').length > 0) return
+    // 两种模式都是「鼠标悬停即可复制」，不用先点出锚点 / 框出区域
+    if (mode.value === 'color') {
+      e.preventDefault()
+      copyPickColor()
+      return
+    }
+    if (mode.value === 'region') {
+      e.preventDefault()
+      copyHoverCoord()
+    }
   }
 }
 
-function setSource(next) {  if (next === 'image') {
+function onGlobalKeyup(e) {
+  if (e.key !== 'Shift') return
+  const alone = shiftAlone
+  shiftAlone = false
+  if (!alone || isTypingTarget(document.activeElement)) return
+  if (mode.value === 'color') {
+    cycleColorFormat()
+    return
+  }
+  if (mode.value === 'region') cycleCoordFormat()
+}
+
+function setSource(next) {
+  if (next === 'image') {
     if (imageMode.value) return
     imageMode.value = true
     frozen.value = false
+    frozenReason.value = ''
     streamError.value = ''
     stream.close()
     if (!imageInfo.value) openImagePicker()
@@ -837,6 +1047,7 @@ watch(serial, async (val) => {
   findResult.value = null
   clearAnchor()
   frozen.value = false
+  frozenReason.value = ''
   if (imageMode.value) return
   if (!val) return
   await loadInfo()
@@ -849,7 +1060,30 @@ watch([fps, scale], () => {
 })
 
 watch(streamError, (val) => {
-  if (val && !imageMode.value) ElMessage.error(val)
+  if (!val || imageMode.value) return
+  // 掉线已有统一的冻结提示，不再重复弹错误
+  if (streamLost.value) return
+  ElMessage.error(val)
+})
+
+/**
+ * 设备断开：自动冻结并保留最后一帧，此时框选 / 取色 / 保存区域图都照旧可用。
+ * 设备恢复后第一帧到达，自动解除冻结继续实时投屏。
+ */
+watch(streamLost, (val) => {
+  if (imageMode.value) return
+  if (val) {
+    if (frozen.value || !bitmap.value) return
+    frozen.value = true
+    frozenReason.value = 'lost'
+    ElMessage.warning('设备连接已断开，已冻结并保留最后一帧')
+    return
+  }
+  if (frozenReason.value === 'lost') {
+    frozen.value = false
+    frozenReason.value = ''
+    ElMessage.success('设备已恢复连接，画面继续实时刷新')
+  }
 })
 
 onMounted(async () => {
@@ -862,6 +1096,7 @@ onMounted(async () => {
     landscapeMql.addEventListener('change', syncLandscape)
   } catch {}
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('keyup', onGlobalKeyup)
   await refreshDevices()
   if (!serial.value) {
     // adb 不可用时退回演示模式，保证工具本身可预览
@@ -873,6 +1108,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   landscapeMql?.removeEventListener('change', syncLandscape)
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('keyup', onGlobalKeyup)
   const bmp = imageBitmap.value
   if (bmp?.close) bmp.close()
 })
@@ -960,5 +1196,92 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 状态栏里的冻结状态 + 操作按钮（放在这里不会遮挡画面） */
+.status-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 19px;
+  margin-left: 2px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid #f5d9a8;
+  background: #fffbeb;
+  color: #b45309;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.status-action:hover {
+  background: #fef3c7;
+  border-color: #eabf6f;
+}
+
+.status-action.danger {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.status-action.danger:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
+.status-action .el-icon {
+  font-size: 11px;
+}
+
+/* 侧栏底部的设置入口 */
+.settings-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  border: 1px solid var(--app-border);
+  background: #fff;
+  color: #475569;
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.settings-btn:hover {
+  color: #0b8480;
+  border-color: #b7e6e3;
+  background: #eef8f8;
+}
+
+.settings-btn .el-icon {
+  font-size: 15px;
+}
+
+@media (orientation: landscape) {
+  .settings-btn {
+    width: 100%;
+    margin-top: 2px;
+  }
+
+  .app-shell.rail-collapsed .settings-btn {
+    width: 34px;
+    padding: 0;
+  }
 }
 </style>

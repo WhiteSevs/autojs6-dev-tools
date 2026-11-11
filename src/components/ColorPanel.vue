@@ -12,10 +12,13 @@
 
     <template v-if="anchor">
       <div class="anchor-box">
-        <div class="anchor-swatch" :style="{ background: color || anchor.hex }">
-          <span class="anchor-hex">{{ color || anchor.hex }}</span>
-        </div>
+        <button class="anchor-swatch" :style="{ background: swatchBg }" title="点击复制颜色" @click="copyColor" />
         <div class="anchor-info">
+          <div class="anchor-row">
+            <span class="k">颜色</span>
+            <b class="mono color-text" title="点击复制颜色" @click="copyColor">{{ colorText }}</b>
+            <button class="fmt-btn" title="按 Shift 也能切换" @click="cycleFormat">{{ formatText }}</button>
+          </div>
           <div class="anchor-row">
             <span class="k">坐标</span>
             <b class="mono">{{ anchor.x }}, {{ anchor.y }}</b>
@@ -29,6 +32,10 @@
             <b class="mono">0x{{ decimalHex }}</b>
           </div>
         </div>
+      </div>
+
+      <div class="hint-text color-hint">
+        <span class="kbd">C</span> 复制当前颜色 · <span class="kbd">Shift</span> 切换格式（{{ formatSample }}）
       </div>
 
       <div class="field-row">
@@ -125,6 +132,10 @@
     <div v-else class="empty-hint">
       切换到「锚点取色」模式，在画面上单击<br />
       即可读取该点的精确颜色与坐标
+      <div class="hover-tip">
+        只是把鼠标移上去、不点击也可以：<br />
+        <span class="kbd">C</span> 复制颜色 · <span class="kbd">Shift</span> 切换格式
+      </div>
     </div>
   </div>
 </template>
@@ -134,6 +145,7 @@ import { computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import CodeCard from './CodeCard.vue'
 import { copyText } from '../api'
+import { formatColor, formatExample, formatLabel, nextFormat, toHex } from '../utils/color'
 
 const props = defineProps({
   anchor: { type: Object, default: null },
@@ -143,14 +155,32 @@ const props = defineProps({
   hasRegion: { type: Boolean, default: false },
   result: { type: Object, default: null },
   loading: { type: Boolean, default: false },
+  format: { type: String, default: 'hex' },
 })
 
-const emit = defineEmits(['update:color', 'update:threshold', 'update:restrict', 'find', 'clear'])
+const emit = defineEmits(['update:color', 'update:threshold', 'update:restrict', 'update:format', 'find', 'clear'])
 
 const decimalHex = computed(() => {
   if (!props.anchor) return '000000'
   return (props.anchor.decimal ?? 0).toString(16).toUpperCase().padStart(6, '0')
 })
+
+/** 当前展示的颜色：优先用「找色值」输入框里的改动，其次锚点色 */
+const currentColor = computed(() => props.color || props.anchor?.hex || '')
+const swatchBg = computed(() => toHex(currentColor.value) || 'transparent')
+const colorText = computed(() => formatColor(currentColor.value, props.format) || props.anchor?.hex || '')
+const formatText = computed(() => formatLabel(props.format))
+const formatSample = computed(() => formatExample(props.format))
+
+async function copyColor() {
+  if (!colorText.value) return
+  const ok = await copyText(colorText.value)
+  ok ? ElMessage.success(`已复制 ${colorText.value}`) : ElMessage.error('复制失败')
+}
+
+function cycleFormat() {
+  emit('update:format', nextFormat(props.format))
+}
 
 const normalizedColor = computed(() => {
   const c = (props.color || props.anchor?.hex || '').trim().toUpperCase()
@@ -189,7 +219,7 @@ async function copyPoint(m) {
 .anchor-box {
   display: flex;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   padding: 10px;
   border: 1px solid var(--app-border);
   border-radius: 10px;
@@ -203,21 +233,14 @@ async function copyPoint(m) {
   flex: 0 0 auto;
   position: relative;
   border: 1px solid rgba(15, 23, 42, 0.12);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  overflow: hidden;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
 }
 
-.anchor-hex {
-  width: 100%;
-  text-align: center;
-  font-family: var(--app-mono);
-  font-size: 9px;
-  padding: 2px 0;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  letter-spacing: 0.2px;
+.anchor-swatch:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.14);
 }
 
 .anchor-info {
@@ -234,6 +257,7 @@ async function copyPoint(m) {
   align-items: baseline;
   gap: 8px;
   font-size: 12px;
+  min-width: 0;
 }
 
 .anchor-row .k {
@@ -247,6 +271,42 @@ async function copyPoint(m) {
   color: #1e293b;
   font-weight: 600;
   font-size: 12px;
+}
+
+.color-text {
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.color-text:hover {
+  color: #0b8480;
+}
+
+.fmt-btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-family: var(--app-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 5px;
+  border: 1px solid #d9e2ec;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.fmt-btn:hover {
+  border-color: #0ea5a0;
+  color: #0b8480;
+  background: #eef8f8;
+}
+
+.color-hint {
+  margin-bottom: 10px;
 }
 
 .slider-row :deep(.el-slider) {
@@ -326,5 +386,14 @@ async function copyPoint(m) {
 .more {
   font-size: 10.5px;
   color: #94a3b8;
+}
+
+.hover-tip {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed #e2e8f0;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.9;
 }
 </style>

@@ -190,15 +190,43 @@ const code = computed(() => {
   const { x, y, w, h } = props.region
   const base = `// AutoJs6 · 区域 [x, y, w, h]
 const region = [${x}, ${y}, ${w}, ${h}];
+const img = captureScreen();
 
 // 1) 裁剪该区域（后续可做模板匹配 / 找色）
-const clip = images.clip(captureScreen(), ...region);
+const clip = images.clip(img, ...region);
 
 // 2) 点击区域中心
 click(region[0] + Math.floor(region[2] / 2), region[1] + Math.floor(region[3] / 2));
 
 // 3) 限定在该区域内找色，速度更快
-const p = images.findColor(captureScreen(), "#FF6B2C", { region, threshold: 8 });`
+const p = images.findColor(img, "#FF6B2C", { region, threshold: 8 });
+
+// 4) 区域找图：用「保存区域图」导出的 PNG 当模板，只在 region 内匹配
+const template = images.read("/sdcard/region-template.png"); // 换成自己的模板路径
+const hit = template ? images.findImage(img, template, { region, threshold: 0.8 }) : null;
+if (hit) {
+    toastLog(\`找到模板：\${hit.x}, \${hit.y}\`);
+    click(hit.x, hit.y);
+} else {
+    toastLog("区域内没有匹配到模板");
+}
+
+// 5) 区域找图（多处）：同一块区域里出现多个相同图标时，一次全部找出来
+//    matchTemplate 需要 AutoJs6 / Auto.js 4.1+，max 是最大返回数量（默认 5）
+const found = template ? images.matchTemplate(img, template, { region, threshold: 0.8, max: 20 }) : null;
+if (found && found.matches.length) {
+    toastLog(\`区域内命中 \${found.matches.length} 处：\${found.points}\`);
+    // 想按「从左到右、从上到下」依次处理：found.sortBy("left-top").matches.forEach(...)
+    found.matches.forEach(({ point, similarity }) => {
+        log(\`(\${point.x}, \${point.y}) 相似度 \${similarity.toFixed(3)}\`);
+        click(point.x, point.y);
+        sleep(300);
+    });
+} else {
+    toastLog("区域内没有匹配到模板");
+}
+
+if (template) template.recycle(); // 用完释放，避免内存占用`
 
   if (!props.offsets.length) return base
 
@@ -212,7 +240,7 @@ const p = images.findColor(captureScreen(), "#FF6B2C", { region, threshold: 8 })
 
   return `${base}
 
-// 4) 中心点偏移：相对区域中心的位置，区域整体平移后依旧成立
+// 6) 中心点偏移：相对区域中心的位置，区域整体平移后依旧成立
 const center = [region[0] + Math.floor(region[2] / 2), region[1] + Math.floor(region[3] / 2)];
 const offsets = [
 ${rows}

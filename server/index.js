@@ -395,6 +395,7 @@ function attachWebSocket(httpServer) {
     let closed = false
     let lastFrameAt = 0
     let smoothedFps = 0
+    let failCount = 0
 
     const send = (obj) => {
       if (!closed && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj))
@@ -465,6 +466,7 @@ function attachWebSocket(httpServer) {
           // 同步刷新缓存，使「取色 / 找色」在帧被淘汰时可秒回
           pngCache.set(serial, { at: Date.now(), promise: Promise.resolve(png) })
           const frame = await encodeFrame(png, { scale: cfg.scale, compressionLevel: cfg.compressionLevel })
+          failCount = 0
           const now = Date.now()
           if (lastFrameAt) {
             const inst = 1000 / Math.max(1, now - lastFrameAt)
@@ -486,8 +488,24 @@ function attachWebSocket(httpServer) {
             fps: Number(smoothedFps.toFixed(1)),
           })
         } catch (err) {
-          send({ type: 'error', message: err.message || String(err), serial })
-          await sleep(1000)
+          failCount += 1
+          // 抓屏失败可能是设备掉了，也可能只是一次抖动（大屏截屏偶发坏帧）。
+          // 用 adb devices 实探一下，别让前端把画面误冻结。
+          let deviceGone = false
+          if (serial !== DEMO_SERIAL) {
+            try {
+              const list = await listDevices()
+              deviceGone = !list.some((d) => d.serial === serial && d.state === 'device')
+            } catch {}
+          }
+          send({
+            type: 'error',
+            message: err.message || String(err),
+            serial,
+            failCount,
+            deviceGone,
+          })
+          await sleep(deviceGone ? 1500 : 800)
           continue
         }
         const interval = 1000 / cfg.fps

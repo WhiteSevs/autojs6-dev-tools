@@ -11,9 +11,11 @@ export function useStream() {
   const paused = ref(false)
   const error = ref('')
   const frameCount = ref(0)
+  /** 实时流中断（设备掉线 / 服务重启）：画面保留最后一帧，由上层决定是否冻结 */
+  const lost = ref(false)
 
   let ws = null
-  let options = { serial: null, fps: 2, scale: 3 }
+  let options = { serial: null, fps: 8, scale: 3 }
   let manualClose = false
   let reconnectTimer = null
   let decoding = false
@@ -46,6 +48,7 @@ export function useStream() {
       meta.value = frameMeta
       ready.value = true
       error.value = ''
+      lost.value = false
       frameCount.value += 1
       if (prev && prev.close) {
         try { prev.close() } catch {}
@@ -60,11 +63,17 @@ export function useStream() {
   function connect(next = {}) {
     options = { ...options, ...next }
     manualClose = false
-    if (ws) {
-      try { ws.close() } catch {}
-      ws = null
-    }
     clearTimeout(reconnectTimer)
+    // 先摘掉旧连接的回调再关闭，避免旧 socket 的 close 触发多余的重连循环
+    const previous = ws
+    ws = null
+    if (previous) {
+      previous.onopen = null
+      previous.onmessage = null
+      previous.onerror = null
+      previous.onclose = null
+      try { previous.close() } catch {}
+    }
     try {
       ws = new WebSocket(buildUrl())
     } catch (err) {
@@ -80,7 +89,14 @@ export function useStream() {
       if (typeof ev.data === 'string') {
         let msg
         try { msg = JSON.parse(ev.data) } catch { return }
-        if (msg.type === 'error') error.value = msg.message
+        if (msg.type === 'error') {
+          error.value = msg.message
+          // 只有「设备确实从 adb 列表里消失」或连续多次抓屏失败才判定为掉线；
+          // 单次坏帧（大屏截屏偶发）不算，避免画面来回冻结
+          if (msg.deviceGone === true || Number(msg.failCount) >= 3) {
+            lost.value = true
+          }
+        }
         if (msg.type === 'ready') ready.value = true
         if (msg.type === 'config') paused.value = !!msg.paused
         return
@@ -93,6 +109,7 @@ export function useStream() {
     ws.onclose = () => {
       ready.value = false
       if (!manualClose) {
+        lost.value = true
         reconnectTimer = setTimeout(() => connect(), 1500)
       }
     }
@@ -139,5 +156,5 @@ export function useStream() {
 
   onBeforeUnmount(close)
 
-  return { bitmap, meta, ready, paused, error, frameCount, connect, configure, pause, resume, refreshNow, close }
+  return { bitmap, meta, ready, paused, error, lost, frameCount, connect, configure, pause, resume, refreshNow, close }
 }

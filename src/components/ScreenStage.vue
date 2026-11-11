@@ -1,5 +1,9 @@
 <template>
-  <div ref="stageRef" class="stage" :class="[`mode-${mode}`, { dragging: !!drag, 'picking-offset': offsetPicking }]">
+  <div
+    ref="stageRef"
+    class="stage"
+    :class="[`mode-${mode}`, { dragging: !!drag, 'picking-offset': offsetPicking, 'no-frame': !hasFrame }]"
+  >
     <canvas
       ref="canvasRef"
       class="stage-canvas"
@@ -55,17 +59,17 @@
           <el-icon><Pointer /></el-icon>
         </button>
       </el-tooltip>
-      <el-tooltip content="缩小（-）" placement="bottom">
+      <el-tooltip content="缩小（- / Ctrl + 滚轮）" placement="bottom">
         <button class="icon-btn" @click="zoomBy(1 / 1.25)"><el-icon><ZoomOut /></el-icon></button>
       </el-tooltip>
-      <el-tooltip content="点击回到适应屏幕（0）" placement="bottom">
+      <el-tooltip content="点击回到适应屏幕（F / 0）" placement="bottom">
         <button class="zoom-label mono" @click="resetZoom">{{ Math.round(scale * 100) }}%</button>
       </el-tooltip>
       <el-tooltip content="放大（+ / Ctrl + 滚轮）" placement="bottom">
         <button class="icon-btn" @click="zoomBy(1.25)"><el-icon><ZoomIn /></el-icon></button>
       </el-tooltip>
       <div class="tool-sep" />
-      <el-tooltip content="1:1 显示设备像素，看清每个像素（同时切到原画传输）" placement="bottom">
+      <el-tooltip content="原画 1:1（O）：一个设备像素对应一个屏幕像素，同时切到原画传输" placement="bottom">
         <button class="preset-btn" :class="{ active: isActualSize }" @click="zoomToActual">原画 1:1</button>
       </el-tooltip>
       <div class="tool-sep" />
@@ -76,13 +80,7 @@
       </el-tooltip>
     </div>
 
-    <!-- 冻结提示 -->
-    <transition name="fade">
-      <button v-if="frozen" class="freeze-badge" @click="$emit('resume')">
-        <el-icon><VideoPause /></el-icon>
-        <span>画面已冻结 · 点击恢复实时</span>
-      </button>
-    </transition>
+    <!-- 冻结状态改由底部状态栏提示，避免角标压在画面上遮挡内容 -->
 
     <!-- 空状态 -->
     <div v-if="!bitmap" class="stage-empty">
@@ -92,7 +90,7 @@
     </div>
 
     <!-- 底部操作提示 -->
-    <div v-if="showToolbar" class="stage-hint">
+    <div v-if="showToolbar && hasFrame" class="stage-hint">
       <template v-if="mode === 'region'">
         <template v-if="offsetPicking">
           <span><b>点击</b>画面取点，得到相对区域中心的偏移量</span>
@@ -102,11 +100,13 @@
           <span><span class="kbd">Esc</span> / <span class="kbd">P</span> 结束取点</span>
         </template>
         <template v-else>
-          <span><b>拖拽</b>框选区域</span>
+          <span><b>拖拽</b>框选</span>
           <span class="dot">·</span>
-          <span>框内拖动可整体移动，拖动<b>边角</b>缩放</span>
+          <span>框内拖动移动，边角缩放</span>
           <span class="dot">·</span>
-          <span><span class="kbd">↑↓←→</span> 微调 1px，<span class="kbd">Shift</span> 10px</span>
+          <span><span class="kbd">↑↓←→</span> 微调（<span class="kbd">Shift</span> ×10）</span>
+          <span class="dot">·</span>
+          <span><span class="kbd">C</span> 复制坐标 · <span class="kbd">Shift</span> 换格式</span>
           <span class="dot">·</span>
           <span><span class="kbd">Ctrl</span>+<span class="kbd">S</span> 保存 / <span class="kbd">Ctrl</span>+<span class="kbd">C</span> 复制{{ region ? '区域图' : '整屏' }}</span>
         </template>
@@ -114,19 +114,19 @@
       <template v-else>
         <span><b>移动</b>查看放大镜，<b>单击</b>拾取锚点颜色</span>
         <span class="dot">·</span>
-        <span><span class="kbd">+</span><span class="kbd">-</span> 缩放，<b>右键拖动</b>或 <span class="kbd">H</span> 平移</span>
+        <span><span class="kbd">C</span> 复制颜色 · <span class="kbd">Shift</span> 切换格式</span>
         <span class="dot">·</span>
-        <span><span class="kbd">Ctrl</span>+<span class="kbd">S</span> 保存 / <span class="kbd">Ctrl</span>+<span class="kbd">C</span> 复制{{ region ? '区域图' : '整屏' }}</span>
+        <span><span class="kbd">+</span><span class="kbd">-</span> 缩放，<span class="kbd">F</span> 适应 / <span class="kbd">O</span> 原画</span>
       </template>
     </div>
 
     <!-- 坐标读数 -->
-    <div v-if="showToolbar && hoverDev" class="coord-readout mono">
-      <span class="c-label">X</span>{{ hoverDev.x }}
-      <span class="c-label">Y</span>{{ hoverDev.y }}
+    <div v-if="showToolbar && hasFrame && hoverEdge" class="coord-readout mono">
+      <span class="c-label">X</span>{{ hoverEdge.x }}
+      <span class="c-label">Y</span>{{ hoverEdge.y }}
       <template v-if="hoverColor">
         <i class="swatch" :style="{ background: hoverColor }" />
-        <span class="c-hex">{{ hoverColor }}</span>
+        <span class="c-hex">{{ hoverColorText }}</span>
       </template>
     </div>
   </div>
@@ -134,6 +134,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { formatColor, toHex } from '../utils/color'
 
 const props = defineProps({
   bitmap: { type: Object, default: null },
@@ -149,6 +150,7 @@ const props = defineProps({
   frozen: { type: Boolean, default: false },
   panMode: { type: Boolean, default: false },
   showToolbar: { type: Boolean, default: true },
+  colorFormat: { type: String, default: 'hex' },
   emptyTitle: { type: String, default: '等待画面…' },
   emptyDesc: { type: String, default: '正在连接设备并拉取屏幕，稍候片刻' },
 })
@@ -175,12 +177,15 @@ const viewport = ref({ w: 0, h: 0 })
 const zoom = ref(1)
 const pan = ref({ x: 0, y: 0 })
 const hoverDev = ref(null)
+/** 显示用的光标坐标：贴到画面边缘时是边界值（W / H），和选区口径一致 */
+const hoverEdge = ref(null)
 const hoverColor = ref('')
 const drag = ref(null)
 const spaceDown = ref(false)
 
 let ctx = null
 let sourceCanvas = null
+let sourceCtx = null
 let rafId = 0
 let dpr = window.devicePixelRatio || 1
 
@@ -191,6 +196,11 @@ const MAX_ZOOM = 16
 const deviceW = computed(() => props.meta?.deviceWidth || 0)
 const deviceH = computed(() => props.meta?.deviceHeight || 0)
 const frameScale = computed(() => props.meta?.scale || 1)
+
+/** 有没有可操作的画面：没拉到第一帧时（等待设备 / 未载入图片）禁止框选与缩放交互 */
+const hasFrame = computed(() => !!props.bitmap && !!props.meta && deviceW.value > 0 && deviceH.value > 0)
+
+const hoverColorText = computed(() => formatColor(hoverColor.value, props.colorFormat) || hoverColor.value)
 
 const fitScale = computed(() => {
   if (!deviceW.value || !deviceH.value || !viewport.value.w) return 1
@@ -219,12 +229,36 @@ function devToScreen(x, y) {
   return [o.x + x * scale.value, o.y + y * scale.value]
 }
 
+/** 映射成设备像素下标（0 … W-1），取色 / 取点用 */
 function screenToDev(sx, sy) {
   const o = origin.value
   return {
     x: Math.max(0, Math.min(deviceW.value - 1, (sx - o.x) / scale.value)),
     y: Math.max(0, Math.min(deviceH.value - 1, (sy - o.y) / scale.value)),
   }
+}
+
+/** 拖到离画面边缘 4px（屏幕上）以内就吸附到边界 */
+const EDGE_SNAP_CSS = 4
+
+/**
+ * 映射成「区域的边」（0 … W / 0 … H）：框选的右、下边是开区间，
+ * 允许正好落在 W / H 上，拖到最大时才能得到 w = 屏幕宽、h = 屏幕高（而不是少 1px）。
+ * snap：光标贴近画面边缘时吸附过去，缩放状态下也能一把拖满整屏。
+ */
+function screenToDevEdge(sx, sy, snap = false) {
+  const o = origin.value
+  const s = scale.value
+  let x = Math.max(0, Math.min(deviceW.value, (sx - o.x) / s))
+  let y = Math.max(0, Math.min(deviceH.value, (sy - o.y) / s))
+  if (snap && s > 0) {
+    const zone = EDGE_SNAP_CSS / s
+    if (x <= zone) x = 0
+    else if (x >= deviceW.value - zone) x = deviceW.value
+    if (y <= zone) y = 0
+    else if (y >= deviceH.value - zone) y = deviceH.value
+  }
+  return { x, y }
 }
 
 /* ------------------------------ 尺寸与重绘 ------------------------------ */
@@ -254,16 +288,20 @@ function schedule() {
 function rebuildSource() {
   if (!props.bitmap || !props.meta) {
     sourceCanvas = null
+    sourceCtx = null
     return
   }
   const w = props.meta.width
   const h = props.meta.height
   if (!sourceCanvas) sourceCanvas = document.createElement('canvas')
-  sourceCanvas.width = w
-  sourceCanvas.height = h
-  const sctx = sourceCanvas.getContext('2d', { willReadFrequently: true })
-  sctx.clearRect(0, 0, w, h)
-  sctx.drawImage(props.bitmap, 0, 0, w, h)
+  // 尺寸没变就不要重设 width/height：那会重建整块像素缓冲区，高帧率下非常吃 CPU
+  if (sourceCanvas.width !== w || sourceCanvas.height !== h) {
+    sourceCanvas.width = w
+    sourceCanvas.height = h
+  }
+  if (!sourceCtx) sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true })
+  sourceCtx.clearRect(0, 0, w, h)
+  sourceCtx.drawImage(props.bitmap, 0, 0, w, h)
 }
 
 /* ------------------------------ 绘制 ------------------------------ */
@@ -614,7 +652,7 @@ function drawAnchor(anchor) {
   ctx.fill()
   ctx.restore()
 
-  const label = `(${anchor.x}, ${anchor.y})  ${anchor.hex || ''}`
+  const label = `(${anchor.x}, ${anchor.y})  ${formatColor(anchor, props.colorFormat)}`
   drawChip(ax + 12, ay - 26 >= 4 ? ay - 26 : ay + 12, label, { bg: 'rgba(220,38,38,0.95)', color: '#fff' })
 }
 
@@ -692,9 +730,7 @@ function drawLoupe() {
   ctx.strokeRect(cx - 0.5, cy - 0.5, cellSize + 1, cellSize + 1)
   ctx.restore()
 
-  const colorText = hoverColor.value || '#——'
-  const [dr, dg, db] = hexToRgb(colorText)
-  const label = `${colorText}  ${dr},${dg},${db}`
+  const label = hoverColorText.value || '取色中…'
   ctx.font = "600 11px 'Cascadia Code', Consolas, monospace"
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
@@ -711,18 +747,12 @@ function drawLoupe() {
 
   ctx.fillStyle = '#e2e8f0'
   // 色块
-  ctx.fillStyle = colorText.startsWith('#') ? colorText : '#334155'
+  ctx.fillStyle = toHex(hoverColor.value) || '#334155'
   roundRect(ctx, lx + 3, barY + 2, 14, 14, 3)
   ctx.fill()
 
   ctx.fillStyle = '#e2e8f0'
   ctx.fillText(label, lx + 23, barY + 9.5)
-}
-
-function hexToRgb(hex) {
-  if (!hex || !hex.startsWith('#')) return [0, 0, 0]
-  const num = parseInt(hex.slice(1), 16)
-  return [(num >> 16) & 0xff, (num >> 8) & 0xff, num & 0xff]
 }
 
 /* ------------------------------ 交互 ------------------------------ */
@@ -732,13 +762,13 @@ function canvasPoint(ev) {
 }
 
 function pickHoverColor(devPt) {
-  if (!sourceCanvas || !props.meta) return ''
+  if (!sourceCanvas || !sourceCtx || !props.meta) return ''
   const bScale = frameScale.value
   const px = Math.floor(devPt.x / bScale)
   const py = Math.floor(devPt.y / bScale)
   if (px < 0 || py < 0 || px >= props.meta.width || py >= props.meta.height) return ''
   try {
-    const d = sourceCanvas.getContext('2d', { willReadFrequently: true }).getImageData(px, py, 1, 1).data
+    const d = sourceCtx.getImageData(px, py, 1, 1).data
     return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()
   } catch {
     return ''
@@ -772,6 +802,8 @@ function clampPanValue(x, y) {
 }
 
 function onPointerDown(ev) {
+  // 还没有画面（等待设备 / 未载入图片）：不进入框选、取色或平移
+  if (!hasFrame.value) return
   canvasRef.value.focus()
   const pt = canvasPoint(ev)
   const dev = screenToDev(pt.x, pt.y)
@@ -803,24 +835,41 @@ function onPointerDown(ev) {
   const sx = pt.x
   const sy = pt.y
   const handle = hitHandle(sx, sy)
+  // 区域四边用「边坐标」，右/下边可以正好等于屏幕宽高
+  const edge = screenToDevEdge(sx, sy)
 
   if (handle) {
     drag.value = { type: 'resize', handle, startRegion: { ...props.region } }
   } else if (insideRegion(dev)) {
-    drag.value = { type: 'move', startDev: dev, startRegion: { ...props.region } }
+    drag.value = { type: 'move', startDev: edge, startRegion: { ...props.region } }
   } else {
-    drag.value = { type: 'new', startDev: dev }
+    drag.value = { type: 'new', startDev: screenToDevEdge(sx, sy, true) }
     emit('update:region', null)
   }
   canvasRef.value.setPointerCapture(ev.pointerId)
 }
 
 function onPointerMove(ev) {
+  const canvas = canvasRef.value
+  if (!hasFrame.value) {
+    if (hoverDev.value || hoverEdge.value) {
+      hoverDev.value = null
+      hoverEdge.value = null
+      hoverColor.value = ''
+      emit('hover', null)
+    }
+    if (canvas) canvas.style.cursor = 'default'
+    return
+  }
   const pt = canvasPoint(ev)
   const dev = screenToDev(pt.x, pt.y)
+  const edge = screenToDevEdge(pt.x, pt.y, true)
   hoverDev.value = { x: Math.floor(dev.x), y: Math.floor(dev.y) }
-  emit('hover', hoverDev.value)
+  // 读数用边界坐标：贴近画面边缘时直接显示 2880 / 1800，和选区口径保持一致
+  hoverEdge.value = { x: Math.floor(edge.x), y: Math.floor(edge.y) }
   if (props.mode === 'color') hoverColor.value = pickHoverColor(hoverDev.value)
+  // 把光标下的颜色一起抛出去：C 复制 / Shift 换格式不必先点出锚点
+  emit('hover', { ...hoverEdge.value, hex: props.mode === 'color' ? hoverColor.value : '' })
 
   const d = drag.value
   if (d) {
@@ -833,38 +882,41 @@ function onPointerMove(ev) {
       return
     }
     if (d.type === 'new') {
-      const x1 = Math.floor(d.startDev.x)
-      const y1 = Math.floor(d.startDev.y)
-      const x2 = Math.floor(dev.x)
-      const y2 = Math.floor(dev.y)
+      const edge = screenToDevEdge(pt.x, pt.y, true)
+      // 起点 floor、终点 ceil：光标扫过的像素都算进选区，
+      // 这样拖到画面边缘时正好框满整屏（不会出现 2879 × 1799）
+      const left = Math.max(0, Math.min(deviceW.value - 1, Math.floor(Math.min(d.startDev.x, edge.x))))
+      const top = Math.max(0, Math.min(deviceH.value - 1, Math.floor(Math.min(d.startDev.y, edge.y))))
+      const right = Math.min(deviceW.value, Math.ceil(Math.max(d.startDev.x, edge.x)))
+      const bottom = Math.min(deviceH.value, Math.ceil(Math.max(d.startDev.y, edge.y)))
       emit('update:region', {
-        x: Math.min(x1, x2),
-        y: Math.min(y1, y2),
-        w: Math.max(1, Math.abs(x2 - x1)),
-        h: Math.max(1, Math.abs(y2 - y1)),
+        x: left,
+        y: top,
+        w: Math.max(1, right - left),
+        h: Math.max(1, bottom - top),
       })
       return
     }
     if (d.type === 'move') {
-      const dx = Math.round(dev.x - d.startDev.x)
-      const dy = Math.round(dev.y - d.startDev.y)
+      const edge = screenToDevEdge(pt.x, pt.y)
+      const dx = Math.round(edge.x - d.startDev.x)
+      const dy = Math.round(edge.y - d.startDev.y)
       const r = d.startRegion
       emit('update:region', {
-        x: Math.max(0, Math.min(deviceW.value - r.w, r.x + dx)),
-        y: Math.max(0, Math.min(deviceH.value - r.h, r.y + dy)),
+        x: Math.max(0, Math.min(Math.max(0, deviceW.value - r.w), r.x + dx)),
+        y: Math.max(0, Math.min(Math.max(0, deviceH.value - r.h), r.y + dy)),
         w: r.w,
         h: r.h,
       })
       return
     }
     if (d.type === 'resize') {
-      emit('update:region', resizeRegion(d.startRegion, d.handle, dev))
+      emit('update:region', resizeRegion(d.startRegion, d.handle, screenToDevEdge(pt.x, pt.y, true)))
       return
     }
   }
 
   // 光标反馈
-  const canvas = canvasRef.value
   if (props.panMode) {
     canvas.style.cursor = 'grab'
   } else if (props.offsetPicking) {
@@ -887,13 +939,17 @@ function resizeRegion(start, handle, dev) {
   let y1 = start.y
   let x2 = start.x + start.w
   let y2 = start.y + start.h
-  const dx = Math.floor(dev.x)
-  const dy = Math.floor(dev.y)
+  // 左/上边向下取整、右/下边向上取整：光标碰到的像素都算进选区，
+  // 这样把控制点拖到画面边缘时正好是满屏，不会再少 1px
+  const dxLeft = Math.floor(dev.x)
+  const dxRight = Math.ceil(dev.x)
+  const dyTop = Math.floor(dev.y)
+  const dyBottom = Math.ceil(dev.y)
 
-  if (handle.includes('w')) x1 = Math.min(dx, x2 - 1)
-  if (handle.includes('e')) x2 = Math.max(dx, x1 + 1)
-  if (handle.includes('n')) y1 = Math.min(dy, y2 - 1)
-  if (handle.includes('s')) y2 = Math.max(dy, y1 + 1)
+  if (handle.includes('w')) x1 = Math.min(dxLeft, x2 - 1)
+  if (handle.includes('e')) x2 = Math.max(dxRight, x1 + 1)
+  if (handle.includes('n')) y1 = Math.min(dyTop, y2 - 1)
+  if (handle.includes('s')) y2 = Math.max(dyBottom, y1 + 1)
 
   x1 = Math.max(0, x1)
   y1 = Math.max(0, y1)
@@ -920,13 +976,14 @@ function onPointerUp(ev) {
 
 function onPointerLeave() {
   hoverDev.value = null
+  hoverEdge.value = null
   hoverColor.value = ''
   emit('hover', null)
   if (!drag.value) schedule()
 }
 
 function onWheel(ev) {
-  if (!ev.ctrlKey) return
+  if (!ev.ctrlKey || !hasFrame.value) return
   ev.preventDefault()
   zoomBy(ev.deltaY < 0 ? 1.12 : 1 / 1.12)
 }
@@ -1018,6 +1075,16 @@ function onKeyDown(ev) {
     resetZoom()
     return
   }
+  if (ev.key === 'f' || ev.key === 'F') {
+    ev.preventDefault()
+    resetZoom()
+    return
+  }
+  if (ev.key === 'o' || ev.key === 'O') {
+    ev.preventDefault()
+    zoomToActual()
+    return
+  }
   if (ev.key === 'h' || ev.key === 'H') {
     ev.preventDefault()
     emit('update:panMode', !props.panMode)
@@ -1088,7 +1155,11 @@ watch(
   { immediate: true },
 )
 
-watch(() => [props.mode, props.region, props.anchor, props.matches, props.bbox, props.frozen, props.offsets, props.offsetPicking], schedule, { deep: true })
+watch(
+  () => [props.mode, props.region, props.anchor, props.matches, props.bbox, props.frozen, props.offsets, props.offsetPicking, props.colorFormat],
+  schedule,
+  { deep: true },
+)
 watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
 </script>
 
@@ -1114,6 +1185,11 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
 
 .stage.picking-offset .stage-canvas {
   cursor: crosshair;
+}
+
+/* 等待画面时（设备还没出第一帧 / 图片还没载入）：保持普通箭头，不暗示可以框选 */
+.stage.no-frame .stage-canvas {
+  cursor: default;
 }
 
 .overlay-toggle {
@@ -1268,29 +1344,6 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
   font-family: var(--app-mono);
 }
 
-.freeze-badge {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid rgba(245, 158, 11, 0.4);
-  background: rgba(255, 251, 235, 0.96);
-  color: #b45309;
-  font-size: 12px;
-  padding: 6px 11px;
-  border-radius: 9px;
-  cursor: pointer;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
-  z-index: 4;
-  font-family: inherit;
-}
-
-.freeze-badge:hover {
-  background: #fef3c7;
-}
-
 .stage-hint {
   position: absolute;
   bottom: 12px;
@@ -1298,6 +1351,9 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
   transform: translateX(-50%);
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  max-width: calc(100% - 24px);
   gap: 7px;
   font-size: 11.5px;
   color: #64748b;
@@ -1392,14 +1448,6 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
   opacity: 0;
 }
 
-/* 容器较窄时：冻结角标下移，避免与浮动工具栏重叠 */
-@container (max-width: 980px) {
-  .freeze-badge {
-    top: 58px;
-    right: 10px;
-  }
-}
-
 /* 画布区域较窄时：工具条换行、底部提示收紧 */
 @container (max-width: 560px) {
   .stage-tools {
@@ -1428,14 +1476,6 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
     font-size: 10.5px;
     row-gap: 2px;
     padding: 5px 8px;
-  }
-
-  .freeze-badge {
-    top: auto;
-    bottom: 54px;
-    right: 8px;
-    font-size: 11px;
-    padding: 5px 9px;
   }
 
   .coord-readout {

@@ -82,7 +82,7 @@ async function doCopy() {
 
 .code-card :deep(.code-box) {
   border-radius: 0;
-  max-height: 220px;
+  max-height: 280px;
 }
 
 .code-card :deep(.tk-cm) {
