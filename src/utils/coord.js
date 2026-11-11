@@ -1,7 +1,7 @@
 /**
  * 区域框选模式下按 C 复制的「当前坐标」格式。
- * 本质就是 [x, y, w, h]：x / y 是光标位置，w / h 取自当前框选，
- * 没框选时为 0；Shift 在「带括号 / 不带括号 / 自定义模板」之间循环。
+ * 本质就是 [x, y, w, h]：已框选时取框选区域，未框选时 x / y 为光标位置、w / h 为 0；
+ * Shift 在「带括号 / 不带括号 / 自定义模板」之间循环。
  */
 export const COORD_FORMATS = [
   { key: 'bracket', label: '带括号', example: '[x, y, w, h]' },
@@ -12,8 +12,8 @@ export const COORD_FORMATS = [
 /** 自定义模板里可用的占位符 */
 export const COORD_PLACEHOLDERS = [
   { key: '${region}', desc: '[x, y, w, h]' },
-  { key: '${x}', desc: '光标 X' },
-  { key: '${y}', desc: '光标 Y' },
+  { key: '${x}', desc: 'X（已框选为区域 X，否则光标 X）' },
+  { key: '${y}', desc: 'Y（已框选为区域 Y，否则光标 Y）' },
   { key: '${w}', desc: '框选宽度（未框选为 0）' },
   { key: '${h}', desc: '框选高度（未框选为 0）' },
 ]

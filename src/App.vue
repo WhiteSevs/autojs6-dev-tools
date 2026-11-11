@@ -860,14 +860,16 @@ function cycleColorFormat() {
   ElMessage.info(`颜色格式：${sample}`)
 }
 
-/** C（区域框选模式）：复制光标当前坐标；已框选时带上 w / h，未框选则为 0 */
+/** C（区域框选模式）：已框选复制框选区域坐标，未框选复制光标当前坐标（w / h 为 0） */
 async function copyHoverCoord() {
-  if (!hoverCoord.value) {
+  const r = region.value
+  const pt = r ? { x: r.x, y: r.y } : hoverCoord.value
+  const size = r ? { w: r.w, h: r.h } : null
+  if (!pt) {
     ElMessage.info('把鼠标移到画面上再按 C 复制坐标')
     return
   }
-  const size = region.value ? { w: region.value.w, h: region.value.h } : null
-  const text = formatCoord(hoverCoord.value, coordFormat.value, size, coordTemplate.value)
+  const text = formatCoord(pt, coordFormat.value, size, coordTemplate.value)
   if (!text) {
     if (coordFormat.value === 'custom') ElMessage.info('自定义模板为空，请到「设置 → 通用」里填写')
     return
