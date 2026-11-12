@@ -35,9 +35,14 @@
           @blur="coordFocused = false"
         >
           <template #suffix>
-            <el-tooltip content="清空坐标，并清除框选、恢复实时" placement="top">
-              <el-icon class="coord-clear" @mousedown.prevent @click.stop="clearCoord"><CircleClose /></el-icon>
-            </el-tooltip>
+            <el-icon
+              class="coord-clear"
+              aria-label="清空坐标并清除框选"
+              @mousedown.prevent
+              @click.stop="clearCoord"
+            >
+              <CircleClose />
+            </el-icon>
           </template>
         </el-input>
         <el-button size="small" type="primary" plain @click="applyCoord">框选</el-button>
