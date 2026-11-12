@@ -28,18 +28,23 @@
           v-model="coordText"
           class="coord-input mono"
           size="small"
-          clearable
           placeholder="[x, y, w, h]"
           @keydown.enter="applyCoord"
           @paste="onPaste"
           @focus="coordFocused = true"
           @blur="coordFocused = false"
-        />
+        >
+          <template #suffix>
+            <el-tooltip content="清空坐标，并清除框选、恢复实时" placement="top">
+              <el-icon class="coord-clear" @mousedown.prevent @click.stop="clearCoord"><CircleClose /></el-icon>
+            </el-tooltip>
+          </template>
+        </el-input>
         <el-button size="small" type="primary" plain @click="applyCoord">框选</el-button>
       </div>
       <div class="coord-hint">
         支持 <span class="mono">[x, y, w, h]</span>、<span class="mono">x, y, w, h</span> 与
-        <span class="mono">x= y= w= h=</span> 标签；只给 x / y 时按当前尺寸平移。
+        <span class="mono">x= y= w= h=</span> 标签；只给 x / y 时按当前尺寸平移。留空回车 / 点 × 可清除框选并恢复实时。
       </div>
     </div>
 
@@ -217,7 +222,7 @@ const props = defineProps({
   meta: { type: Object, default: null },
 })
 
-const emit = defineEmits(['update:region', 'update:offsets', 'update:picking', 'clear-region', 'interact'])
+const emit = defineEmits(['update:region', 'update:offsets', 'update:picking', 'clear-region', 'interact', 'resume'])
 const saving = ref('')
 
 /* ------------------------------ 坐标输入 ------------------------------ */
@@ -243,8 +248,23 @@ function applyRegion(region, text) {
   ElMessage.success(`已框选 ${formatRegionText(region)}`)
 }
 
+/** 清空坐标输入 → 清除框选并恢复实时画面（留空回车 / 点「框选」/ 点输入框右侧 × 都走这里） */
+function clearCoord() {
+  const had = !!props.region
+  coordText.value = ''
+  // 先恢复实时，再清区域：这样 App 的 clearRegion 不会再重复恢复一次
+  emit('resume')
+  emit('clear-region')
+  if (had) ElMessage.success('已清除框选，画面恢复实时')
+}
+
 function applyCoord() {
-  const res = parseRegion(coordText.value, {
+  const text = String(coordText.value ?? '').trim()
+  if (!text) {
+    clearCoord()
+    return
+  }
+  const res = parseRegion(text, {
     width: props.deviceW,
     height: props.deviceH,
     current: props.region,
@@ -521,6 +541,17 @@ async function copyRegion() {
   font-family: var(--app-mono);
   font-size: 12px;
   letter-spacing: 0.1px;
+}
+
+.coord-clear {
+  font-size: 14px;
+  color: #b6c6ca;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.coord-clear:hover {
+  color: #ef4444;
 }
 
 .coord-hint {

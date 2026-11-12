@@ -227,6 +227,7 @@
             @update:region="setRegion"
             @clear-region="clearRegion"
             @interact="freezeFrame"
+            @resume="resumeLive"
             @update:offsets="(v) => (offsets = v)"
             @update:picking="(v) => (offsetPicking = v)"
           />
