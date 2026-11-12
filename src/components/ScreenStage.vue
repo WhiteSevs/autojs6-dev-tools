@@ -1008,10 +1008,10 @@ function onPointerUp(ev) {
     drag.value = null
     if (d.pending) {
       // 没有拖动 = 一次单击：
-      // 单击选区外 → 取消框选；冻结状态下顺带恢复实时画面
-      if (props.clickResume && props.mode === 'region') {
+      // 只有单击「选区外」才取消框选并恢复实时；单击选区内属于选中状态的操作区，不做任何处理
+      if (props.clickResume && props.mode === 'region' && d.type === 'new') {
         if (props.frozen) emit('resume')
-        if (d.type === 'new') emit('clear-region')
+        emit('clear-region')
       }
     } else if (props.clickResume && props.mode === 'region' && d.type === 'new' && isTinySelection()) {
       // 拖出来的框小到没有意义（手抖 / 误触），按单击处理：取消碎框并恢复实时
