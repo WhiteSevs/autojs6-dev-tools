@@ -10,6 +10,39 @@
       </span>
     </div>
 
+    <!-- 坐标输入：没有区域时也能用，粘贴 / 回车直接框选 -->
+    <div class="coord-box">
+      <div class="coord-head">
+        <span class="coord-title">
+          <el-icon><EditPen /></el-icon>
+          坐标输入
+        </span>
+        <span class="coord-sub">回车 / 粘贴即框选</span>
+        <button class="coord-paste" @click="readClipboard">
+          <el-icon><DocumentCopy /></el-icon>
+          <span>读剪贴板</span>
+        </button>
+      </div>
+      <div class="coord-row">
+        <el-input
+          v-model="coordText"
+          class="coord-input mono"
+          size="small"
+          clearable
+          placeholder="[x, y, w, h]"
+          @keydown.enter="applyCoord"
+          @paste="onPaste"
+          @focus="coordFocused = true"
+          @blur="coordFocused = false"
+        />
+        <el-button size="small" type="primary" plain @click="applyCoord">框选</el-button>
+      </div>
+      <div class="coord-hint">
+        支持 <span class="mono">[x, y, w, h]</span>、<span class="mono">x, y, w, h</span> 与
+        <span class="mono">x= y= w= h=</span> 标签；只给 x / y 时按当前尺寸平移。
+      </div>
+    </div>
+
     <template v-if="region">
       <div class="grid2">
         <div class="num-field">
@@ -72,6 +105,15 @@
           <b class="mono">{{ ratio }}%</b>
         </div>
       </div>
+
+      <!-- 区域预览：直接用画面像素裁剪，拖动时实时跟着变 -->
+      <RegionPreview
+        :bitmap="bitmap"
+        :meta="meta"
+        :region="region"
+        :serial="serial"
+        :frame-id="frameId"
+      />
 
       <!-- 中心点偏移：以区域中心为原点，取画面其它位置的相对坐标 -->
       <div class="offset-block">
@@ -147,18 +189,20 @@
     </template>
 
     <div v-else class="empty-hint">
-      在左侧画面上按住拖拽即可框选区域<br />
-      松开后可拖动边角精确调整，得到 x / y / w / h<br />
-      框选后还能「添加偏移点」，取画面其它位置相对区域中心的偏移量
+      在画面上按住拖拽即可框选区域<br />
+      也可以在上面输入 / 粘贴坐标后回车框选（在画面里按 <span class="kbd">Ctrl</span>+<span class="kbd">V</span> 同样可以）<br />
+      框选后能预览区域图片、添加偏移点、导出 PNG
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CodeCard from './CodeCard.vue'
+import RegionPreview from './RegionPreview.vue'
 import { copyImageToClipboard, copyText, downloadBlob, shotBlob } from '../api'
+import { formatRegionText, parseRegion } from '../utils/region'
 
 const props = defineProps({
   region: { type: Object, default: null },
@@ -168,10 +212,76 @@ const props = defineProps({
   deviceH: { type: Number, default: 0 },
   serial: { type: String, default: '' },
   frameId: { type: Number, default: null },
+  /** 当前画面，用于区域预览 */
+  bitmap: { type: Object, default: null },
+  meta: { type: Object, default: null },
 })
 
 const emit = defineEmits(['update:region', 'update:offsets', 'update:picking', 'clear-region'])
 const saving = ref('')
+
+/* ------------------------------ 坐标输入 ------------------------------ */
+const coordText = ref('')
+const coordFocused = ref(false)
+
+/** 拖动 / 改数值时同步输入框，方便看清楚现在是哪一段；正在输入时不打断 */
+watch(
+  () => props.region,
+  (r) => {
+    if (coordFocused.value) return
+    coordText.value = r ? formatRegionText(r) : ''
+  },
+  { immediate: true },
+)
+
+function applyRegion(region, text) {
+  emit('update:region', region)
+  if (text != null) coordText.value = text
+  else coordText.value = formatRegionText(region)
+  ElMessage.success(`已框选 ${formatRegionText(region)}`)
+}
+
+function applyCoord() {
+  const res = parseRegion(coordText.value, {
+    width: props.deviceW,
+    height: props.deviceH,
+    current: props.region,
+  })
+  if (!res.ok) {
+    ElMessage.warning(res.error)
+    return
+  }
+  applyRegion(res.region)
+}
+
+/** 粘贴时先尝试解析：能解析就直接框选，解析不了就让文本正常进输入框再手改 */
+function onPaste(ev) {
+  const text = ev.clipboardData?.getData('text') || ''
+  if (!text.trim()) return
+  const res = parseRegion(text, {
+    width: props.deviceW,
+    height: props.deviceH,
+    current: props.region,
+  })
+  if (!res.ok) return
+  ev.preventDefault()
+  applyRegion(res.region, text.trim())
+}
+
+async function readClipboard() {
+  try {
+    if (!navigator.clipboard?.readText) throw new Error('浏览器不允许读取剪贴板，请直接 Ctrl+V 粘贴')
+    const text = await navigator.clipboard.readText()
+    if (!text?.trim()) {
+      ElMessage.info('剪贴板里没有文本')
+      return
+    }
+    coordText.value = text.trim()
+    applyCoord()
+  } catch (err) {
+    ElMessage.warning(err.message || '读取剪贴板失败，请直接 Ctrl+V 粘贴')
+  }
+}
 
 const center = computed(() =>
   props.region
@@ -337,6 +447,91 @@ async function copyRegion() {
 </script>
 
 <style scoped>
+.coord-box {
+  border: 1px solid #d9eef0;
+  background: #f6fcfc;
+  border-radius: 10px;
+  padding: 8px 9px 9px;
+  margin-bottom: 10px;
+}
+
+.coord-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.coord-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0b8480;
+}
+
+.coord-sub {
+  font-size: 10.5px;
+  color: #9db4b8;
+}
+
+.coord-paste {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 6px;
+  border: 1px solid #cdeae8;
+  background: #fff;
+  color: #0b8480;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex: 0 0 auto;
+}
+
+.coord-paste:hover {
+  background: #eef8f8;
+  border-color: #9fdcd8;
+}
+
+.coord-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.coord-row .el-button {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+
+.coord-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.coord-input :deep(.el-input__inner) {
+  font-family: var(--app-mono);
+  font-size: 12px;
+  letter-spacing: 0.1px;
+}
+
+.coord-hint {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #8aa1a5;
+}
+
+.coord-hint .mono {
+  color: #5d8b8b;
+}
+
 .grid2 {
   display: grid;
   grid-template-columns: 1fr 1fr;

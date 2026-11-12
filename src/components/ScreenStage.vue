@@ -103,6 +103,11 @@
           <span><b>拖拽</b>框选</span>
           <span class="dot">·</span>
           <span>框内拖动移动，边角缩放</span>
+          <template v-if="clickResume && frozen">
+            <span class="dot">·</span>
+            <span v-if="region"><b>单击</b>选区外取消框选并恢复实时</span>
+            <span v-else><b>单击</b>画面恢复实时</span>
+          </template>
           <span class="dot">·</span>
           <span><span class="kbd">↑↓←→</span> 微调（<span class="kbd">Shift</span> ×10）</span>
           <span class="dot">·</span>
@@ -151,6 +156,8 @@ const props = defineProps({
   panMode: { type: Boolean, default: false },
   showToolbar: { type: Boolean, default: true },
   colorFormat: { type: String, default: 'hex' },
+  /** 框选冻结后，单击画面（不拖动）即恢复实时；可在设置里关闭 */
+  clickResume: { type: Boolean, default: true },
   emptyTitle: { type: String, default: '等待画面…' },
   emptyDesc: { type: String, default: '正在连接设备并拉取屏幕，稍候片刻' },
 })
@@ -193,6 +200,14 @@ let dpr = window.devicePixelRatio || 1
 const PAD = 26
 const MIN_ZOOM = 0.4
 const MAX_ZOOM = 16
+/**
+ * 指针位移小于这个值（CSS px）就算「单击」，用于区分框选与点击恢复实时。
+ * 取 8px 是为了容住鼠标 / 触控板点按时的手抖 —— 以前 3px 时，抖几像素就会
+ * 被当成框选，结果留下一个碎框、画面还停在冻结状态。
+ */
+const CLICK_SLOP = 8
+/** 新框选在屏幕上小于这个尺寸（CSS px）时，按单击处理，不保留碎框 */
+const MIN_SELECT_CSS = 10
 
 const deviceW = computed(() => props.meta?.deviceWidth || 0)
 const deviceH = computed(() => props.meta?.deviceHeight || 0)
@@ -832,19 +847,38 @@ function onPointerDown(ev) {
     return
   }
 
-  emit('interact')
   const sx = pt.x
   const sy = pt.y
   const handle = hitHandle(sx, sy)
   // 区域四边用「边坐标」，右/下边可以正好等于屏幕宽高
   const edge = screenToDevEdge(sx, sy)
+  // 画面外的灰色留白也算「区域外」，否则贴着边缘的选区会把留白处的点击误判成「移动区域」
+  const o = origin.value
+  const inImage = sx >= o.x && sx <= o.x + o.dw && sy >= o.y && sy <= o.y + o.dh
+  const type = handle ? 'resize' : inImage && insideRegion(dev) ? 'move' : 'new'
 
-  if (handle) {
-    drag.value = { type: 'resize', handle, startRegion: { ...props.region } }
-  } else if (insideRegion(dev)) {
-    drag.value = { type: 'move', startDev: edge, startRegion: { ...props.region } }
+  if (props.clickResume) {
+    // 先不动手：等确认是真的在拖拽再冻结画面 / 清空旧区域，
+    // 这样「单击画面」可以继续用来恢复实时（见 onPointerUp）
+    drag.value = {
+      type,
+      handle,
+      startClient: { x: ev.clientX, y: ev.clientY },
+      startDev: type === 'new' ? screenToDevEdge(sx, sy, true) : edge,
+      startRegion: props.region ? { ...props.region } : null,
+      pending: true,
+    }
+    canvasRef.value.setPointerCapture(ev.pointerId)
+    return
+  }
+
+  emit('interact')
+  if (type === 'resize') {
+    drag.value = { type, handle, startRegion: { ...props.region } }
+  } else if (type === 'move') {
+    drag.value = { type, startDev: edge, startRegion: { ...props.region } }
   } else {
-    drag.value = { type: 'new', startDev: screenToDevEdge(sx, sy, true) }
+    drag.value = { type, startDev: screenToDevEdge(sx, sy, true) }
     emit('update:region', null)
   }
   canvasRef.value.setPointerCapture(ev.pointerId)
@@ -874,6 +908,14 @@ function onPointerMove(ev) {
 
   const d = drag.value
   if (d) {
+    if (d.pending) {
+      // 超过阈值才算拖拽：这时才冻结画面，并让「新建框选」清掉旧区域
+      const moved = Math.hypot(ev.clientX - d.startClient.x, ev.clientY - d.startClient.y)
+      if (moved < CLICK_SLOP) return
+      d.pending = false
+      emit('interact')
+      if (d.type === 'new') emit('update:region', null)
+    }
     if (d.type === 'pan') {
       pan.value = clampPanValue(
         d.startPan.x + (ev.clientX - d.startClient.x),
@@ -961,11 +1003,22 @@ function resizeRegion(start, handle, dev) {
 }
 
 function onPointerUp(ev) {
-  if (drag.value) {
-    const d = drag.value
+  const d = drag.value
+  if (d) {
     drag.value = null
-    // 没有拖出有效区域（纯点击 / 极小拖拽）＝取消框选，走 clear-region，让 App 按设置决定是否恢复实时
-    if (d.type === 'new' && (!props.region || (props.region.w < 3 && props.region.h < 3))) {
+    if (d.pending) {
+      // 没有拖动 = 一次单击：
+      // 单击选区外 → 取消框选；冻结状态下顺带恢复实时画面
+      if (props.clickResume && props.mode === 'region') {
+        if (props.frozen) emit('resume')
+        if (d.type === 'new') emit('clear-region')
+      }
+    } else if (props.clickResume && props.mode === 'region' && d.type === 'new' && isTinySelection()) {
+      // 拖出来的框小到没有意义（手抖 / 误触），按单击处理：取消碎框并恢复实时
+      if (props.frozen) emit('resume')
+      emit('clear-region')
+    } else if (d.type === 'new' && (!props.region || (props.region.w < 3 && props.region.h < 3))) {
+      // 没有拖出有效区域（纯点击 / 极小拖拽）＝取消框选，让 App 按设置决定是否恢复实时
       emit('clear-region')
     }
     schedule()
@@ -974,6 +1027,14 @@ function onPointerUp(ev) {
   try {
     canvasRef.value.releasePointerCapture(ev.pointerId)
   } catch {}
+}
+
+/** 当前框选在屏幕上的尺寸是否小到应该当成单击（CSS px） */
+function isTinySelection() {
+  const r = props.region
+  if (!r) return true
+  const s = scale.value || 1
+  return r.w * s < MIN_SELECT_CSS && r.h * s < MIN_SELECT_CSS
 }
 
 function onPointerLeave() {

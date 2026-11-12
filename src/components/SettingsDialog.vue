@@ -30,8 +30,21 @@
 
         <div class="set-row">
           <div class="set-text">
+            <div class="set-label">单击恢复实时</div>
+            <div class="set-desc">
+              框选会冻结画面；冻结后<strong>单击选区外</strong>即取消框选并恢复实时，单击选区内只恢复实时、保留框选。
+              若这一次是拖拽，则重新框选并冻结。关闭后改为按下鼠标立刻冻结，单击不再恢复。
+            </div>
+          </div>
+          <el-switch :model-value="clickResume" @update:model-value="(v) => emit('update:clickResume', v)" />
+        </div>
+
+        <div class="set-row">
+          <div class="set-text">
             <div class="set-label">取消框选后恢复实时</div>
-            <div class="set-desc">按 Esc / Delete 或点「清空」移除区域时，自动解除画面冻结、恢复实时刷新（默认关闭）</div>
+            <div class="set-desc">
+              按 Esc / Delete 或点右侧「清空」移除区域时，自动解除画面冻结、恢复实时刷新（默认关闭）
+            </div>
           </div>
           <el-switch :model-value="resumeOnClear" @update:model-value="(v) => emit('update:resumeOnClear', v)" />
         </div>
@@ -55,7 +68,7 @@
           <div class="set-text">
             <div class="set-label">坐标格式</div>
             <div class="set-desc">
-              区域框选时按 C 复制光标当前坐标：未框选 w / h 为 0，框选后带真实宽高；Shift 循环切换
+              区域框选时按 C 复制坐标：已框选复制整块选区 [x, y, w, h]，未框选复制光标位置 [x, y, 0, 0]；Shift 循环切换
             </div>
           </div>
           <el-select
@@ -162,11 +175,20 @@ const props = defineProps({
   colorFormat: { type: String, default: 'hex' },
   coordFormat: { type: String, default: 'bracket' },
   coordTemplate: { type: String, default: DEFAULT_COORD_TEMPLATE },
+  clickResume: { type: Boolean, default: true },
   resumeOnClear: { type: Boolean, default: false },
   env: { type: Object, default: null },
 })
 
-const emit = defineEmits(['update:modelValue', 'update:toolbar', 'update:colorFormat', 'update:coordFormat', 'update:coordTemplate', 'update:resumeOnClear'])
+const emit = defineEmits([
+  'update:modelValue',
+  'update:toolbar',
+  'update:colorFormat',
+  'update:coordFormat',
+  'update:coordTemplate',
+  'update:clickResume',
+  'update:resumeOnClear',
+])
 
 const tab = ref('general')
 
@@ -192,12 +214,14 @@ const SHORTCUTS = [
     group: '区域框选',
     items: [
       { keys: ['拖拽'], desc: '拖出一个新区域' },
+      { keys: ['单击'], desc: '单击选区外取消框选并恢复实时，单击选区内只恢复实时（可在「通用」里关闭该行为）' },
+      { keys: ['Ctrl', 'V'], desc: '粘贴坐标文本直接框选（[x, y, w, h] / x= y= w= h=），输入框内粘贴同样生效' },
       { keys: ['框内拖动'], desc: '整体移动区域' },
       { keys: ['拖动边角'], desc: '缩放区域（八向控制点）' },
       { keys: ['↑ ↓ ← →'], desc: '区域微调 1px' },
       { keys: ['Shift', '↑ ↓ ← →'], desc: '区域微调 10px' },
       { keys: ['P'], desc: '开始 / 结束中心点偏移取点' },
-      { keys: ['C'], desc: '复制光标当前坐标：未框选为 [x, y, 0, 0]，框选后带上真实 w / h' },
+      { keys: ['C'], desc: '复制坐标：已框选复制选区 [x, y, w, h]，未框选复制光标位置 [x, y, 0, 0]' },
       { keys: ['Shift'], desc: '切换坐标格式：带括号 [x, y, w, h] / 不带括号 x, y, w, h / 自定义模板' },
       { keys: ['Esc'], desc: '结束取点，或清除当前区域' },
       { keys: ['Delete'], desc: '清除当前区域' },

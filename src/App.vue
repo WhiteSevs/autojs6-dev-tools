@@ -191,6 +191,7 @@
             :bbox="mode === 'color' ? bbox : null"
             :frozen="frozen && !imageMode"
             :color-format="colorFormat"
+            :click-resume="clickResume"
             :empty-title="imageMode ? '还没有载入图片' : '等待画面…'"
             :empty-desc="
               imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
@@ -221,6 +222,8 @@
             :device-h="deviceH"
             :serial="activeSerial"
             :frame-id="displayMeta?.frameId"
+            :bitmap="displayBitmap"
+            :meta="displayMeta"
             @update:region="setRegion"
             @clear-region="clearRegion"
             @update:offsets="(v) => (offsets = v)"
@@ -330,12 +333,14 @@
       :color-format="colorFormat"
       :coord-format="coordFormat"
       :coord-template="coordTemplate"
+      :click-resume="clickResume"
       :resume-on-clear="resumeOnClear"
       :env="env"
       @update:toolbar="setToolbarDefault"
       @update:color-format="setColorFormat"
       @update:coord-format="setCoordFormat"
       @update:coord-template="setCoordTemplate"
+      @update:click-resume="setClickResume"
       @update:resume-on-clear="setResumeOnClear"
     />
   </div>
@@ -352,6 +357,7 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import { useStream } from './composables/useStream'
 import { api, copyImageToClipboard, copyText, downloadBlob, shotBlob } from './api'
 import { formatColor, formatExample, nextFormat, normalizeFormat } from './utils/color'
+import { formatRegionText, parseRegion } from './utils/region'
 import {
   DEFAULT_COORD_TEMPLATE,
   coordFormatExample,
@@ -384,6 +390,9 @@ const settingsOpen = ref(false)
 const colorFormat = ref(readColorFormat())
 const coordFormat = ref(readCoordFormat())
 const coordTemplate = ref(readCoordTemplate())
+/** 框选冻结后单击画面恢复实时：默认开启 */
+const clickResume = ref(readClickResume())
+/** 取消框选（Esc / Delete / 清空）后恢复实时：默认关闭 */
 const resumeOnClear = ref(readResumeOnClear())
 
 /* 数据源：设备 / 本地图片 */
@@ -473,6 +482,21 @@ function setToolbarDefault(v) {
   showToolbar.value = v
   try {
     localStorage.setItem('autojs6.showToolbar', v ? '1' : '0')
+  } catch {}
+}
+
+function readClickResume() {
+  try {
+    return localStorage.getItem('autojs6.clickResumeLive') !== '0'
+  } catch {
+    return true
+  }
+}
+
+function setClickResume(v) {
+  clickResume.value = !!v
+  try {
+    localStorage.setItem('autojs6.clickResumeLive', v ? '1' : '0')
   } catch {}
 }
 
@@ -899,15 +923,23 @@ function cycleColorFormat() {
   ElMessage.info(`颜色格式：${sample}`)
 }
 
-/** C（区域框选模式）：已框选复制框选区域坐标，未框选复制光标当前坐标（w / h 为 0） */
-async function copyHoverCoord() {
-  const r = region.value
-  const pt = r ? { x: r.x, y: r.y } : hoverCoord.value
-  const size = r ? { w: r.w, h: r.h } : null
+/**
+ * C 复制的坐标来源：已框选时取框选的 x / y（整块选区），
+ * 没框选时取光标下的坐标。
+ */
+function coordSourcePoint() {
+  if (region.value) return region.value
+  return hoverCoord.value
+}
+
+/** C（区域框选模式）：已框选复制整块选区 [x, y, w, h]，未框选复制光标位置 [x, y, 0, 0] */
+async function copyCoord() {
+  const pt = coordSourcePoint()
   if (!pt) {
     ElMessage.info('把鼠标移到画面上再按 C 复制坐标')
     return
   }
+  const size = region.value ? { w: region.value.w, h: region.value.h } : null
   const text = formatCoord(pt, coordFormat.value, size, coordTemplate.value)
   if (!text) {
     if (coordFormat.value === 'custom') ElMessage.info('自定义模板为空，请到「设置 → 通用」里填写')
@@ -926,7 +958,7 @@ function cycleCoordFormat() {
   }
   const size = region.value ? { w: region.value.w, h: region.value.h } : null
   const sample =
-    formatCoord(hoverCoord.value, coordFormat.value, size, coordTemplate.value) ||
+    formatCoord(coordSourcePoint(), coordFormat.value, size, coordTemplate.value) ||
     coordFormatExample(coordFormat.value, coordTemplate.value)
   const short = sample.length > 60 ? `${sample.slice(0, 60)}…` : sample
   ElMessage.info(sample ? `坐标格式（${label}）：${short}` : `坐标格式：${label}`)
@@ -973,7 +1005,7 @@ function onGlobalKeydown(e) {
     }
     if (mode.value === 'region') {
       e.preventDefault()
-      copyHoverCoord()
+      copyCoord()
     }
   }
 }
@@ -988,6 +1020,27 @@ function onGlobalKeyup(e) {
     return
   }
   if (mode.value === 'region') cycleCoordFormat()
+}
+
+/**
+ * 画面上直接 Ctrl / ⌘ + V：把剪贴板里的坐标文本变成框选区域。
+ * 输入框内的粘贴交给输入框自己处理（那边解析成功会直接框选）。
+ */
+function onGlobalPaste(e) {
+  if (mode.value !== 'region') return
+  if (isTypingTarget(e.target)) return
+  const text = e.clipboardData?.getData('text') || ''
+  if (!text.trim()) return
+  const res = parseRegion(text, {
+    width: deviceW.value,
+    height: deviceH.value,
+    current: region.value,
+  })
+  // 解析不出来就当普通粘贴，不劫持
+  if (!res.ok) return
+  e.preventDefault()
+  region.value = res.region
+  ElMessage.success(`已按坐标框选 ${formatRegionText(res.region)}`)
 }
 
 function setSource(next) {
@@ -1177,6 +1230,7 @@ onMounted(async () => {
   } catch {}
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('keyup', onGlobalKeyup)
+  window.addEventListener('paste', onGlobalPaste)
   await refreshDevices()
   if (!serial.value) {
     // adb 不可用时退回演示模式，保证工具本身可预览
@@ -1189,6 +1243,7 @@ onBeforeUnmount(() => {
   landscapeMql?.removeEventListener('change', syncLandscape)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('keyup', onGlobalKeyup)
+  window.removeEventListener('paste', onGlobalPaste)
   const bmp = imageBitmap.value
   if (bmp?.close) bmp.close()
 })
