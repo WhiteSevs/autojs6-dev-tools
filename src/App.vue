@@ -226,6 +226,7 @@
             :meta="displayMeta"
             @update:region="setRegion"
             @clear-region="clearRegion"
+            @interact="freezeFrame"
             @update:offsets="(v) => (offsets = v)"
             @update:picking="(v) => (offsetPicking = v)"
           />
@@ -662,7 +663,8 @@ async function loadInfo() {
 
 /* ------------------------------ 画面 ------------------------------ */
 function freezeFrame() {
-  if (frozen.value) return
+  // 图片模式没有实时可冻结，别把 frozen 置脏（否则切回设备时会误显示「已冻结」）
+  if (frozen.value || imageMode.value) return
   frozen.value = true
   frozenReason.value = 'manual'
   stream.pause()
@@ -1039,6 +1041,8 @@ function onGlobalPaste(e) {
   // 解析不出来就当普通粘贴，不劫持
   if (!res.ok) return
   e.preventDefault()
+  // 按坐标框选时冻结画面，避免实时刷新导致选区和看到的画面对不上
+  freezeFrame()
   region.value = res.region
   ElMessage.success(`已按坐标框选 ${formatRegionText(res.region)}`)
 }

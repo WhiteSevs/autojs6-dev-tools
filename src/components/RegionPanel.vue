@@ -217,7 +217,7 @@ const props = defineProps({
   meta: { type: Object, default: null },
 })
 
-const emit = defineEmits(['update:region', 'update:offsets', 'update:picking', 'clear-region'])
+const emit = defineEmits(['update:region', 'update:offsets', 'update:picking', 'clear-region', 'interact'])
 const saving = ref('')
 
 /* ------------------------------ 坐标输入 ------------------------------ */
@@ -235,6 +235,8 @@ watch(
 )
 
 function applyRegion(region, text) {
+  // 先用坐标框选也要冻结画面，否则实时画面还在动，选区和看到的画面会对不上
+  emit('interact')
   emit('update:region', region)
   if (text != null) coordText.value = text
   else coordText.value = formatRegionText(region)
