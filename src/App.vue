@@ -59,12 +59,18 @@
 
           <div class="hb-btns">
             <el-tooltip content="刷新设备列表" :placement="tipPlacement">
-              <el-button :loading="loadingDevices" circle @click="refreshDevices">
+              <el-button :loading="loadingDevices" circle @click="refreshDevices()">
                 <el-icon v-if="!loadingDevices"><Refresh /></el-icon>
               </el-button>
             </el-tooltip>
 
-            <el-popover placement="bottom-start" :width="286" trigger="click">
+            <el-popover
+              v-model:visible="connectOpen"
+              placement="bottom-start"
+              :width="286"
+              trigger="click"
+              @after-enter="focusConnectInputOnEnter"
+            >
               <template #reference>
                 <el-button>
                   <el-icon><Connection /></el-icon>
@@ -73,10 +79,42 @@
               </template>
               <div class="popover-body">
                 <div class="popover-title">通过 Wi-Fi 连接 Android 设备</div>
-                <el-input v-model="connectAddr" size="small" placeholder="192.168.1.20:5555" class="mono" />
+                <el-input
+                  ref="connectInputRef"
+                  v-model="connectAddr"
+                  size="small"
+                  placeholder="192.168.1.20:5555"
+                  class="mono"
+                  :disabled="connecting"
+                  @keyup.enter="onConnectEnter"
+                />
+                <div v-if="connectHistory.length" class="history-block">
+                  <div class="history-title">最近连接</div>
+                  <ul class="history-list">
+                    <li v-for="h in connectHistory" :key="h.addr" class="history-item">
+                      <button
+                        type="button"
+                        class="history-main"
+                        :title="`点击直接连接 ${h.addr}`"
+                        @click="connectFromHistory(h)"
+                      >
+                        <span class="mono history-addr">{{ h.addr }}</span>
+                        <span class="history-time">{{ formatConnectTime(h.at) }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="history-del"
+                        title="删除这条历史"
+                        @click.stop="removeConnectHistory(h.addr)"
+                      >
+                        <el-icon><Close /></el-icon>
+                      </button>
+                    </li>
+                  </ul>
+                </div>
                 <div class="popover-actions">
                   <el-button size="small" type="primary" :loading="connecting" @click="doConnect">连接</el-button>
-                  <el-button size="small" @click="connectAddr = ''">清空</el-button>
+                  <el-button size="small" :disabled="connecting" @click="connectAddr = ''">清空</el-button>
                 </div>
                 <div class="hint-text">
                   先在同一局域网下执行 <span class="mono">adb tcpip 5555</span>，或使用 USB 配对后的端口。
@@ -394,7 +432,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import ScreenStage from './components/ScreenStage.vue'
 import RegionPanel from './components/RegionPanel.vue'
@@ -440,6 +478,65 @@ const info = ref(null)
 const loadingDevices = ref(false)
 const connecting = ref(false)
 const connectAddr = ref('')
+/** 无线连接弹窗是否展开：连接成功后由代码收起 */
+const connectOpen = ref(false)
+/** 弹窗里的输入框实例，展开时用它自动聚焦 */
+const connectInputRef = ref(null)
+
+/* -------------------- 无线连接历史（localStorage 持久化） -------------------- */
+const CONNECT_HISTORY_KEY = 'autojs6.connectHistory.v1'
+/** 只留最近几条，太多了弹窗里翻不过来 */
+const CONNECT_HISTORY_MAX = 6
+
+/**
+ * 读取历史连接地址：[{ addr, at }]
+ * 一律按 at 降序返回（最新的排最上面），顺手清掉脏数据 / 超量条目
+ */
+function readConnectHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CONNECT_HISTORY_KEY) || '[]')
+    if (!Array.isArray(raw)) return []
+    return raw
+      .filter((it) => it && typeof it.addr === 'string' && it.addr)
+      .map((it) => ({ addr: it.addr, at: Number(it.at) || 0 }))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, CONNECT_HISTORY_MAX)
+  } catch {
+    return []
+  }
+}
+
+const connectHistory = ref(readConnectHistory())
+
+function saveConnectHistory() {
+  try {
+    localStorage.setItem(CONNECT_HISTORY_KEY, JSON.stringify(connectHistory.value))
+  } catch {}
+}
+
+/** 记录一条成功连接：同地址只留一条并顶到最前，因此列表天然是时间降序 */
+function rememberConnect(addr) {
+  const at = Date.now()
+  connectHistory.value = [
+    { addr, at },
+    ...connectHistory.value.filter((h) => h.addr !== addr),
+  ].slice(0, CONNECT_HISTORY_MAX)
+  saveConnectHistory()
+}
+
+function removeConnectHistory(addr) {
+  connectHistory.value = connectHistory.value.filter((h) => h.addr !== addr)
+  saveConnectHistory()
+}
+
+/** 历史条目上的时间：今天只显示 HH:mm，跨天显示 MM-DD HH:mm */
+function formatConnectTime(at) {
+  if (!at) return ''
+  const d = new Date(at)
+  const pad = (n) => String(n).padStart(2, '0')
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return d.toDateString() === new Date().toDateString() ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
+}
 
 const mode = ref('region')
 const panMode = ref(false)
@@ -726,7 +823,11 @@ const statusDotClass = computed(() => {
 })
 
 /* ------------------------------ 设备 ------------------------------ */
-async function refreshDevices() {
+/**
+ * 拉取设备列表
+ * @param {string} [preferSerial] 优先切换到的设备（无线连接成功后指向刚连上的那台）
+ */
+async function refreshDevices(preferSerial = '') {
   loadingDevices.value = true
   try {
     const res = await api.devices()
@@ -735,8 +836,22 @@ async function refreshDevices() {
     if (!res.ok && res.error) {
       ElMessage.warning(res.error)
     }
+    const ready = (d) => !!d && d.ready
+    const pick = (s) => {
+      // 只接受字符串：直接写 @click="refreshDevices" 会把 MouseEvent 传进来
+      if (typeof s !== 'string' || !s) return null
+      const exact = devices.value.find((d) => d.serial === s)
+      if (ready(exact)) return exact
+      // adb 偶尔把 serial 规范化成别的形式（端口不同 / 主机名解析），按主机段兜底匹配
+      const host = s.includes(':') ? s.split(':')[0] : ''
+      if (!host) return null
+      return devices.value.find((d) => ready(d) && d.serial.split(':')[0] === host) || null
+    }
+    const preferred = pick(preferSerial)
     const currentValid = devices.value.some((d) => d.serial === serial.value && d.ready)
-    if (!currentValid) {
+    if (preferred) {
+      serial.value = preferred.serial
+    } else if (!currentValid) {
       const real = devices.value.find((d) => d.ready && d.serial !== 'demo')
       serial.value = (real || devices.value.find((d) => d.ready))?.serial || ''
     }
@@ -747,21 +862,93 @@ async function refreshDevices() {
   }
 }
 
+/** 弹窗展开后把焦点交给输入框：内容可能还没挂载完，逐帧重试几次 */
+function focusConnectInput(left = 20) {
+  const el = connectInputRef.value
+  if (!el) {
+    if (left > 0) requestAnimationFrame(() => focusConnectInput(left - 1))
+    return
+  }
+  el.focus?.()
+  el.select?.()
+}
+
+/** 展开动画结束后的兜底：只在输入框还没拿到焦点时才动它，避免抢走用户刚敲的内容 */
+function focusConnectInputOnEnter() {
+  const el = connectInputRef.value
+  if (el?.input && document.activeElement === el.input) return
+  focusConnectInput()
+}
+
+/**
+ * 规范化用户输入：兼容粘贴 `adb connect 1.2.3.4:5555`、全角冒号、多余空白，省略端口时补 5555
+ */
+function normalizeConnectAddr(raw) {
+  let s = String(raw || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^adb\s+connect\s+/i, '')
+    .replace(/^connect\s+/i, '')
+    .replace(/：/g, ':')
+    .trim()
+  if (!s) return ''
+  // 纯 IPv4 / 主机名没带端口 → 默认 5555（已带冒号的 IPv6 原样保留）
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(s) || /^[a-z0-9._-]+$/i.test(s)) s += ':5555'
+  return s
+}
+
+/** 回车即连接：中文输入法联想中按回车不算 */
+function onConnectEnter(e) {
+  if (e?.isComposing || e?.keyCode === 229) return
+  doConnect()
+}
+
+/** 点历史条目：填进输入框并直接连，不用再敲回车 */
+function connectFromHistory(item) {
+  if (connecting.value) return
+  connectAddr.value = item.addr
+  doConnect()
+}
+
 async function doConnect() {
-  const addr = connectAddr.value.trim()
-  if (!addr) return
+  if (connecting.value) return
+  const addr = normalizeConnectAddr(connectAddr.value)
+  if (!addr) {
+    ElMessage.warning('请输入设备地址，如 192.168.1.20:5555')
+    focusConnectInput()
+    return
+  }
+  connectAddr.value = addr
   connecting.value = true
   try {
     const r = await api.connect(addr)
-    ElMessage[r.ok ? 'success' : 'error'](r.message || '连接已发送')
-    if (r.ok) {
-      connectAddr.value = ''
-      await refreshDevices()
+    if (!r.ok) {
+      ElMessage.error(r.message || '连接失败，请检查地址与网络')
+      return
     }
+    // 连上后立刻收起弹窗，别挡画面；清空输入框，下次点开是干净的
+    connectOpen.value = false
+    connectAddr.value = ''
+    rememberConnect(addr)
+    const prev = serial.value
+    // 刷新列表并直接切到刚连上的设备（serial 变化会触发投屏重建）
+    await refreshDevices(addr)
+    const picked = devices.value.find((d) => d.serial === serial.value)
+    if (picked && picked.serial === prev && !imageMode.value && (streamLost.value || !ready.value)) {
+      // 选中的本来就是这台：watch 不会触发，画面没就绪就手动重建一次
+      frozen.value = false
+      frozenReason.value = ''
+      stream.connect(streamOptions())
+    }
+    ElMessage.success(picked && picked.ready ? `已连接并切换到 ${picked.model || picked.serial}` : r.message || '连接成功')
   } catch (err) {
     ElMessage.error(err.message)
   } finally {
     connecting.value = false
+    // 连接失败时弹窗还开着：把焦点还回输入框，方便改地址重试
+    nextTick(() => {
+      if (connectOpen.value) focusConnectInput()
+    })
   }
 }
 
@@ -1335,6 +1522,12 @@ watch(
   { deep: true },
 )
 
+/* 无线连接弹窗展开 → 输入框自动聚焦，直接敲地址回车即可 */
+watch(connectOpen, (open) => {
+  if (!open) return
+  nextTick(() => requestAnimationFrame(() => focusConnectInput()))
+})
+
 watch(serial, async (val) => {
   region.value = null
   findResult.value = null
@@ -1496,6 +1689,109 @@ onBeforeUnmount(() => {
 
 .popover-actions .el-button {
   margin-left: 0;
+}
+
+/* 最近连接：按时间降序，点一下直接连，右侧叉号删掉这条 */
+.history-block {
+  border-top: 1px dashed #e2e8f0;
+  padding-top: 8px;
+  margin-top: 2px;
+}
+
+.history-title {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+}
+
+.history-item:hover {
+  background: #f1f5f9;
+}
+
+.history-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.history-addr {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: #334155;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-time {
+  flex: none;
+  font-size: 10.5px;
+  color: #a8b3c4;
+}
+
+.history-del {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+
+.history-item:hover .history-del,
+.history-del:focus-visible {
+  opacity: 1;
+}
+
+/* 触摸屏没有 hover，删除按钮一直显示，否则看不见 */
+@media (hover: none) {
+  .history-del {
+    opacity: 1;
+  }
+}
+
+.history-del:hover {
+  color: #dc2626;
+  background: #fee2e2;
 }
 
 .adb-tag {
