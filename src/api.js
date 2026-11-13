@@ -41,15 +41,17 @@ export const api = {
   connect: (address) => request('/api/connect', { method: 'POST', body: JSON.stringify({ address }) }),
   disconnect: (address) => request('/api/disconnect', { method: 'POST', body: JSON.stringify({ address }) }),
   info: (serial) => request(`/api/info?serial=${encodeURIComponent(serial)}`),
-  pixel: (serial, x, y, frameId) =>
+  pixel: (serial, x, y, frameId, fresh) =>
     request('/api/pick', {
       method: 'POST',
-      body: JSON.stringify({ serial, x: Math.round(x), y: Math.round(y), frameId }),
+      body: JSON.stringify({ serial, x: Math.round(x), y: Math.round(y), frameId, fresh: !!fresh }),
     }),
   findColor: (payload) => request('/api/findColor', { method: 'POST', body: JSON.stringify(payload) }),
   tap: (serial, x, y) =>
     request('/api/tap', { method: 'POST', body: JSON.stringify({ serial, x, y }) }),
   swipe: (payload) => request('/api/swipe', { method: 'POST', body: JSON.stringify(payload) }),
+  /** 长按拖拽（draganddrop）：用于图标排序 / 拖放这类「按住再移动」的手势 */
+  drag: (payload) => request('/api/drag', { method: 'POST', body: JSON.stringify(payload) }),
   key: (serial, key) => request('/api/key', { method: 'POST', body: JSON.stringify({ serial, key }) }),
   uploadImage: (payload) => request('/api/image', { method: 'POST', body: JSON.stringify(payload) }),
   snapshotUrl: (serial, scale = 1) =>

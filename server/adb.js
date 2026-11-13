@@ -182,6 +182,37 @@ export async function shellSwipe(serial, { x1, y1, x2, y2, duration = 300 }) {
   return { ok: r.code === 0, message: r.stderr.trim() }
 }
 
+/**
+ * 长按拖拽：`input draganddrop` 会先按住（超过长按阈值）再移动，系统才会把后续移动当成拖拽，
+ * 普通 swipe 的移动从按下就开始，长按计时会被打断，所以拖放 / 排序必须用这个。
+ * 老系统没有 draganddrop 时退回 motionevent 组合（DOWN → 等待 → MOVE → UP）。
+ */
+export async function shellDragAndDrop(serial, { x1, y1, x2, y2, duration = 800 }) {
+  const r = await runAdb(
+    ['-s', serial, 'shell', 'input', 'draganddrop', String(x1), String(y1), String(x2), String(y2), String(duration)],
+    { timeout: 20000 },
+  )
+  if (r.code === 0) return { ok: true, message: r.stderr.trim() }
+
+  const fallback = await runAdb(
+    [
+      '-s',
+      serial,
+      'shell',
+      `input motionevent DOWN ${x1} ${y1};`,
+      'sleep',
+      '0.7;',
+      `input motionevent MOVE ${x2} ${y2};`,
+      `input motionevent UP ${x2} ${y2}`,
+    ],
+    { timeout: 20000 },
+  )
+  return {
+    ok: fallback.code === 0,
+    message: fallback.code === 0 ? 'drag（motionevent 回退）' : fallback.stderr.trim() || r.stderr.trim(),
+  }
+}
+
 const KEY_CODES = { back: 4, home: 3, recents: 187, power: 26, volume_up: 24, volume_down: 25, enter: 66 }
 
 export async function shellKey(serial, key) {

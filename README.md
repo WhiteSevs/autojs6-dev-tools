@@ -12,6 +12,11 @@
   图片会被归一化成 PNG 交给同一套取色 / 找色 / 裁剪管线，所以坐标与颜色跟真机完全一致，与设备无关时也能用。
 - **实时投屏**：服务端 `adb exec-out screencap -p` 抓帧 → sharp 缩放后以 **PNG 无损**推流 → WebSocket 推送，支持刷新率与清晰度调节，
   **清晰度可选「原画 1:1」**，按设备真实像素推送（3200×1440 每帧约 2.6MB）。
+- **画面来源可切换（截图 / 录屏）**：左侧「画面 → 来源」二选一。
+  **截图**沿用 `screencap`，像素无损但帧率受截屏速度限制；**录屏**改用 `screenrecord` 输出 H.264 流，
+  浏览器用 **WebCodecs** 硬解码，可跑到 50–60 fps，**码率可调**（降序：100 / 20 / 16 / 12 / 10 / 8 / 6 / 4 / 2 Mbps，默认最高档）。
+  录屏是有损压缩，因此**取色 / 找色 / 保存截图仍走 `screencap` 现截一帧**，坐标与颜色依然精确；
+  切换来源、改码率或改画质都会自动重开一段录屏并重建解码器，无需手动刷新。
 - **区域框选**：在画面上拖拽得到 `[x, y, w, h]`（设备物理像素），支持整体拖动、8 个控制点缩放、方向键微调（Shift ×10）。
 - **单击恢复实时**：框选会让画面自动冻结；冻结后**单击选区外**即取消框选并恢复实时，单击**选区内不做处理**
   （保持冻结，方便继续拖动 / 缩放选区）；如果这一次是拖拽框选，就重新冻结。
@@ -45,6 +50,15 @@
   区域内找图（单处，`images.findImage`）、区域内找图（多处，`images.matchTemplate` 一次返回所有命中点）**示例，
   模板直接用上面导出的区域 PNG。
 - **设备操作**：保存整屏、按锚点点击、返回 / Home / 最近任务。
+- **远程触控（录屏专用）**：右侧「设备与操作 → 远程触控」一个 **实时点击** 开关，开启后画面就是一块触摸板，
+  **画面保持实时、不冻结也不取色**：
+  - **按下**立刻在真机上按下（`input motionevent DOWN`），**拖动过程中实时发位置**（`MOVE`，约 45ms 一次、
+    只发最新点），**松开**立刻抬起（`UP`）——所以拖拽是真机在跟着鼠标走，而不是松手后才补一个手势。
+  - 单击、长按、长按后拖拽（排序 / 拖放）、滑动滚动翻页都由这一条真实的触摸流自然产生，不需要算法猜你在做什么。
+  - down / move / up 写在**同一个 `adb shell`** 里（不是每次重新起 adb），设备看到的是连续手势；
+    服务端按 ack 控制排队长度，跟不上时自动丢掉中间点，不会越拖越滞后。断线 / 刷新页面 / 停服务都会兜底抬起手指。
+  - 画面上有「点击真机 / 拖拽真机」角标，点画面外的留白不会误触。再点一次开关或「退出触控」即可恢复框选 / 取色，
+    切回截图模式或切到图片模式也会自动退出。
 - **演示模式**：没有设备时自动生成一块会动的模拟屏幕，功能可完整体验。
 
 ## 界面预览
@@ -157,6 +171,13 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
   逐个像素级的精确取色必须依赖完整截图，因此这里优先保证「值正确」而非「画面流畅」。状态栏会显示真实帧率与单帧耗时。
 - 服务端保留最近 6 帧原始截图（环形缓冲）：前端请求携带 `frameId`，取色/找色直接命中**你正在看的那一帧**，
   既避免重复截屏，也避免「画面与取到的颜色不一致」。
+- **录屏模式（`screenrecord`）**：`adb exec-out screenrecord --output-format=h264 --bit-rate=… --size=… -` 把 H.264 裸流
+  按块推给前端，前端用 `Annex-B` 解析成访问单元后交给 WebCodecs `VideoDecoder` 解码，**解出多少帧就上屏多少帧**
+  （实测 2880×1800 稳定 60 fps，单帧 `createImageBitmap` + 上屏约 0.6ms）。
+  这一路是**有损**的（码率越低越糊），所以只用来「看」：取色、找色、保存区域图都会临时截一帧无损 PNG，
+  录屏本身对取色结果没有任何影响。
+  `screenrecord` 单次上限 180 秒，到点由服务端自动续录并从关键帧重建解码器，画面不会中断。
+  「画质」在录屏模式下换算成 `--size`（按 16 对齐），设备横竖屏切换后重开一次录屏即可重新测量尺寸。
 
 ## 接口一览
 
@@ -168,15 +189,19 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 | GET | `/api/info?serial=` | 分辨率 / 密度 / 型号 / Android 版本 |
 | GET | `/api/snapshot?serial=&scale=` | 单张 PNG 截图（无损） |
 | POST | `/api/shot` | 1:1 原始像素截图 `{ serial, frameId, region?, fresh? }`，返回 PNG（无损） |
-| POST | `/api/pick` | 精确取色 `{ serial, x, y, frameId }` |
+| POST | `/api/pick` | 精确取色 `{ serial, x, y, frameId, fresh? }`（`fresh` 强制现截一帧，录屏模式用） |
 | POST | `/api/image` | 上传图片作为数据源 `{ name, dataUrl }` → 返回 `serial: "file:xxx"`，之后各接口照常用 |
 | GET | `/api/pixel?serial=&x=&y=&frame=` | 精确取色（GET 形式） |
-| POST | `/api/findColor` | 全屏找色 `{ serial, color, threshold, region, frameId }` |
-| POST | `/api/tap` `/api/swipe` `/api/key` | 设备操作 |
-| WS | `/ws/screen?serial=&fps=&scale=&level=` | 投屏推流（PNG 无损，`level` 仅影响体积） |
+| POST | `/api/findColor` | 全屏找色 `{ serial, color, threshold, region, frameId, fresh? }` |
+| POST | `/api/tap` `/api/swipe` `/api/key` | 设备操作（单次点击 / 滑动 / 按键；「点击锚点」「返回」等按钮用） |
+| POST | `/api/drag` | 一步到位的长按拖拽（`input draganddrop`，老系统回退到 `motionevent` 组合），脚本 / 调试用 |
+| WS | `/ws/screen?serial=&fps=&scale=&level=&mode=&bitrate=` | 投屏推流（`mode=screenshot` 走 PNG 无损；`mode=record` 走 H.264 裸流，`bitrate` 单位 bps） |
+| WS 消息 | `{ type: "touch", phase, x, y }` | 远程触控：`phase` = `down` / `move` / `up` / `cancel`，走同一条投屏连接，实时注入到真机 |
 
 ## 已知限制
 
 - 仅支持 Windows / macOS / Linux 桌面端运行（依赖本机 adb），手机浏览器无法使用。
+- **录屏**需要浏览器支持 WebCodecs（Chrome / Edge 94 及以上，Safari 16.4+ 也可以），并依赖设备的 `screenrecord`。
+  演示模式（无真机）与个别机型（厂商裁剪 / 编码器被占用）无法录屏，此时会自动回退到截图模式并给出提示。
 - 无线调试需设备与电脑同一局域网，并先 `adb tcpip 5555`。
 - 未实现模板匹配、多点找色；如需可在此基础上扩展 `/api/findColor` 的同族算法。

@@ -114,6 +114,31 @@
           <span class="topbar-label hb-title">画面</span>
           <div class="hb-fields">
             <div class="hb-field">
+              <label>来源</label>
+              <div class="hb-seg">
+                <button
+                  :class="{ active: !recordMode }"
+                  title="逐帧截图（screencap）：像素无损，取色最准"
+                  @click="setFrameSource('shot')"
+                >
+                  <el-icon><Camera /></el-icon><span class="btn-text">截图</span>
+                </button>
+                <button
+                  :class="{ active: recordMode }"
+                  :disabled="isDemo"
+                  :title="
+                    isDemo
+                      ? '演示模式没有真实设备，无法录屏'
+                      : '屏幕录制（screenrecord）：画面更流畅，码率可调'
+                  "
+                  @click="setFrameSource('record')"
+                >
+                  <el-icon><VideoCamera /></el-icon><span class="btn-text">录屏</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="hb-field">
               <label>实时</label>
               <el-tooltip :content="frozen ? '恢复实时画面' : '冻结当前画面，便于精确框选'" :placement="tipPlacement">
                 <el-switch
@@ -128,9 +153,13 @@
             </div>
 
             <div class="hb-field">
-              <label>帧率</label>
-              <el-select v-model="fps" class="fps-select" size="small">
+              <label>{{ recordMode ? '码率' : '帧率' }}</label>
+              <!-- 两个下拉都常驻（v-show），避免 v-if 切换时复用同一个 el-select 实例导致显示值与绑定值错位 -->
+              <el-select v-show="!recordMode" v-model="fps" :key="'fps'" class="fps-select" size="small">
                 <el-option v-for="v in FPS_OPTIONS" :key="v" :label="`${v} fps`" :value="v" />
+              </el-select>
+              <el-select v-show="recordMode" v-model="bitrate" :key="'bitrate'" class="bitrate-select" size="small">
+                <el-option v-for="b in BITRATE_OPTIONS" :key="b" :label="`${b / 1000000} Mbps`" :value="b" />
               </el-select>
             </div>
 
@@ -192,6 +221,7 @@
             :frozen="frozen && !imageMode"
             :color-format="colorFormat"
             :click-resume="clickResume"
+            :live-touch="liveTouch"
             :empty-title="imageMode ? '还没有载入图片' : '等待画面…'"
             :empty-desc="
               imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
@@ -202,6 +232,7 @@
             @pick="onPick"
             @pick-offset="onPickOffset"
             @interact="freezeFrame"
+            @touch="onLiveTouch"
             @resume="resumeLive"
             @request-original="ensureOriginal"
             @hover="onHover"
@@ -248,7 +279,15 @@
             @find="runFind"
             @clear="clearAnchor"
           />
-          <DevicePanel v-if="!imageMode" :serial="serial" :info="info" :anchor="anchor" />
+          <DevicePanel
+            v-if="!imageMode"
+            :serial="serial"
+            :info="info"
+            :anchor="anchor"
+            :record-mode="recordMode"
+            :live-touch="liveTouch"
+            @update:live-touch="setLiveTouch"
+          />
           <div v-else class="panel-card">
             <div class="panel-head">
               <span class="panel-head-icon"><el-icon><Picture /></el-icon></span>
@@ -317,7 +356,13 @@
           <template v-if="!imageMode"> · 传输 <b class="mono">{{ displayMeta.width }} × {{ displayMeta.height }}</b></template>
         </span>
         <span v-if="displayMeta && !imageMode">
-          实际 <b class="mono">{{ displayMeta.fps || 0 }} fps</b> · 单帧 <b class="mono">{{ displayMeta.cost || 0 }}ms</b>
+          实际 <b class="mono">{{ displayMeta.fps || 0 }} fps</b>
+          <template v-if="displayMeta.format === 'h264'">
+            · 码率 <b class="mono">{{ Math.round((displayMeta.bitrate || 0) / 1000000) }} Mbps</b>
+          </template>
+          <template v-else>
+            · 单帧 <b class="mono">{{ displayMeta.cost || 0 }}ms</b>
+          </template>
         </span>
         <span v-if="hoverText" class="mono">光标 {{ hoverText }}</span>
         <span v-if="lastError" class="err-text">{{ lastError }}</span>
@@ -372,9 +417,21 @@ import {
 
 /** 帧率由高到低排列，默认最高帧率 */
 const FPS_OPTIONS = [8, 5, 3, 2, 1]
+/** 录屏码率档位（bps，降序排列）：截图模式不用它，切到录屏才显示。100 Mbps 为支持上限 */
+const BITRATE_OPTIONS = [100, 20, 16, 12, 10, 8, 6, 4, 2].map((v) => v * 1000000)
+/** 默认取最高档 */
+const DEFAULT_BITRATE = BITRATE_OPTIONS[0]
 
 const stream = useStream()
-const { bitmap, meta, ready, paused, error: streamError, lost: streamLost } = stream
+const {
+  bitmap,
+  meta,
+  ready,
+  paused,
+  error: streamError,
+  lost: streamLost,
+  recordFatal,
+} = stream
 
 const env = ref(null)
 const devices = ref([])
@@ -396,6 +453,10 @@ const coordTemplate = ref(readCoordTemplate())
 const clickResume = ref(readClickResume())
 /** 取消框选（Esc / Delete / 清空）后恢复实时：默认关闭 */
 const resumeOnClear = ref(readResumeOnClear())
+/** 画面来源：shot = 逐帧截图（screencap），record = 屏幕录制（screenrecord） */
+const frameSource = ref(readFrameSource())
+/** 录屏码率（bps），截图模式不生效 */
+const bitrate = ref(readBitrate())
 
 /* 数据源：设备 / 本地图片 */
 const imageMode = ref(false)
@@ -531,6 +592,52 @@ function readResumeOnClear() {
   }
 }
 
+function readFrameSource() {
+  try {
+    return localStorage.getItem('autojs6.frameSource') === 'record' ? 'record' : 'shot'
+  } catch {
+    return 'shot'
+  }
+}
+
+/** 码率档位改过一次，旧键直接弃用：老值不在新档位里时不至于悄悄沿用低码率 */
+const BITRATE_KEY = 'autojs6.bitrate.v2'
+
+function readBitrate() {
+  try {
+    const v = Number(localStorage.getItem(BITRATE_KEY))
+    return BITRATE_OPTIONS.includes(v) ? v : DEFAULT_BITRATE
+  } catch {
+    return DEFAULT_BITRATE
+  }
+}
+
+/**
+ * 切换画面来源。
+ * 截图 = 每帧调一次 screencap（像素无损、帧率低）；
+ * 录屏 = screenrecord 出 H.264 流，流畅且省 USB 带宽，但是有损压缩。
+ */
+function setFrameSource(next) {
+  if (next === 'record') {
+    if (isDemo.value) {
+      ElMessage.info('演示模式没有真实设备，录屏不可用')
+      return
+    }
+    if (typeof window.VideoDecoder === 'undefined') {
+      ElMessage.error('当前浏览器不支持 WebCodecs（H.264 解码），请使用 Chrome / Edge 94 及以上版本')
+      return
+    }
+  }
+  if (frameSource.value === next) return
+  frameSource.value = next
+  try {
+    localStorage.setItem('autojs6.frameSource', next)
+  } catch {}
+  if (next === 'record') {
+    ElMessage.success('已切到屏幕录制：画面更流畅；取色 / 保存仍按实时截图取精确像素')
+  }
+}
+
 function setResumeOnClear(v) {
   resumeOnClear.value = !!v
   try {
@@ -587,6 +694,11 @@ const fps = ref(FPS_OPTIONS[0])
 const scale = ref(1)
 
 const adbOk = computed(() => !!env.value?.ok)
+const isDemo = computed(() => serial.value === 'demo')
+/** 实际生效的录屏状态：演示模式没有真机，自动退回截图 */
+const recordMode = computed(() => frameSource.value === 'record' && !isDemo.value)
+/** 录屏模式服务端没有帧缓冲，取色 / 保存要现截一帧拿精确像素 */
+const shotFresh = computed(() => recordMode.value && !imageMode.value)
 const deviceW = computed(() => displayMeta.value?.deviceWidth || info.value?.screen?.width || 0)
 const deviceH = computed(() => displayMeta.value?.deviceHeight || info.value?.screen?.height || 0)
 const matches = computed(() => findResult.value?.matches || [])
@@ -601,8 +713,8 @@ const statusText = computed(() => {
   if (!adbOk.value) return '未检测到 adb'
   if (!serial.value) return '未选择设备'
   if (frozen.value) return '已冻结画面'
-  if (!ready.value) return '正在连接画面…'
-  return serial.value === 'demo' ? '演示模式' : '实时投屏中'
+  if (!ready.value) return recordMode.value ? '正在启动屏幕录制…' : '正在连接画面…'
+  return serial.value === 'demo' ? '演示模式' : recordMode.value ? '屏幕录制中' : '实时投屏中'
 })
 
 const statusDotClass = computed(() => {
@@ -689,12 +801,23 @@ function onFreezeAction() {
   else resumeLive()
 }
 
+/** 建立 / 重建投屏连接所需的全部参数（画面来源与码率也在里面） */
+function streamOptions() {
+  return {
+    serial: serial.value,
+    fps: fps.value,
+    scale: scale.value,
+    mode: recordMode.value ? 'record' : 'shot',
+    bitrate: bitrate.value,
+  }
+}
+
 /** 设备断开后点状态栏按钮 / 切回实时：重连设备，第一帧回来会自动解冻 */
 function retryStream() {
   if (imageMode.value || !serial.value) return
   ElMessage.info('正在重新连接设备…')
   refreshDevices()
-  stream.connect({ serial: serial.value, fps: fps.value, scale: scale.value })
+  stream.connect(streamOptions())
 }
 
 /** 光标移动：同步坐标，并记住光标下的颜色（锚点取色模式下才有） */
@@ -838,6 +961,7 @@ async function saveCurrentShot() {
       frameId: displayMeta.value?.frameId,
     }
     if (area) payload.region = area
+    if (shotFresh.value) payload.fresh = true
 
     const blob = await shotBlob(payload)
     const stamp = fileStamp()
@@ -869,6 +993,7 @@ async function copyCurrentShot() {
   const area = region.value
   const payload = { serial: activeSerial.value, frameId: displayMeta.value?.frameId }
   if (area) payload.region = area
+  if (shotFresh.value) payload.fresh = true
 
   const pending = shotBlob(payload)
   pending.catch(() => {}) // 避免剪贴板提前失败时产生未处理的 rejection
@@ -1062,7 +1187,7 @@ function setSource(next) {
   if (!imageMode.value) return
   imageMode.value = false
   if (serial.value) {
-    stream.connect({ serial: serial.value, fps: fps.value, scale: scale.value })
+    stream.connect(streamOptions())
   }
 }
 
@@ -1119,10 +1244,38 @@ watch(mode, (val) => {
 })
 
 /* ------------------------------ 取色与找色 ------------------------------ */
+/** 远程触控开关：只有录屏画面下才允许开启（画面实时，点哪就操作哪） */
+const liveTouch = ref(false)
+
+/** 切换远程触控；录屏模式下画面是实时的，点哪就操作哪 */
+function setLiveTouch(on) {
+  if (!on) {
+    liveTouch.value = false
+    return
+  }
+  if (!recordMode.value) {
+    ElMessage.info('切到「录屏」画面后才能直接操作真机')
+    return
+  }
+  liveTouch.value = true
+  // 触控要看着实时画面点，顺手把冻结解掉
+  if (frozen.value) resumeLive()
+}
+
+/**
+ * 画面上的触摸事件 → 真机。
+ * down 立刻发、拖动过程中按 40ms 的节奏发最新位置、抬手发 up，
+ * 所以按住拖拽是真机在跟着鼠标走，而不是松开后才「补」一个手势。
+ */
+function onLiveTouch({ phase, x, y }) {
+  if (!serial.value || imageMode.value) return
+  stream.sendTouch({ phase, x, y })
+}
+
 async function onPick(pt) {
   if (!activeSerial.value) return
   try {
-    const px = await api.pixel(activeSerial.value, pt.x, pt.y, displayMeta.value?.frameId)
+    const px = await api.pixel(activeSerial.value, pt.x, pt.y, displayMeta.value?.frameId, shotFresh.value)
     lastError.value = ''
     anchor.value = { x: px.x, y: px.y, hex: px.hex, r: px.r, g: px.g, b: px.b, decimal: px.decimal }
     searchColor.value = px.hex
@@ -1144,6 +1297,8 @@ async function runFind() {
       region: restrict.value && region.value ? region.value : null,
       limit: 800,
       frameId: displayMeta.value?.frameId,
+      // 找色不强制重新截屏：取色时刚截过一帧，服务端 2.5s 内会复用，
+      // 这样「取哪个像素」和「在哪找色」用的是同一帧，结果更一致
     })
     lastError.value = ''
   } catch (err) {
@@ -1189,12 +1344,39 @@ watch(serial, async (val) => {
   if (imageMode.value) return
   if (!val) return
   await loadInfo()
-  stream.connect({ serial: val, fps: fps.value, scale: scale.value })
+  stream.connect(streamOptions())
 })
 
 watch([fps, scale], () => {
   if (imageMode.value) return
   stream.configure({ fps: fps.value, scale: scale.value })
+})
+
+/* 切画面来源 / 调码率：来源变更重建连接（服务端整条管道要换），码率只发 config 让服务端重开录屏 */
+watch([frameSource, bitrate], () => {
+  try {
+    localStorage.setItem(BITRATE_KEY, String(bitrate.value))
+  } catch {}
+  if (imageMode.value) return
+  stream.configure({ mode: recordMode.value ? 'record' : 'shot', bitrate: bitrate.value })
+})
+
+/* 离开录屏画面（切回截图 / 切到图片）就退出远程触控，避免后续点击误发到真机 */
+watch(recordMode, (val) => {
+  if (!val) liveTouch.value = false
+})
+
+/* 录屏彻底不可用（设备不支持 / 编码器被占用 / 解码失败）：提示后自动退回截图 */
+watch(recordFatal, (val) => {
+  if (!val) return
+  recordFatal.value = ''
+  // 这一条的提示由下面这行统一给出，别让 streamError 再弹一个重复的 toast
+  streamError.value = ''
+  ElMessage.error(`录屏不可用：${val}，已切回截图模式`)
+  frameSource.value = 'shot'
+  try {
+    localStorage.setItem('autojs6.frameSource', 'shot')
+  } catch {}
 })
 
 watch(streamError, (val) => {

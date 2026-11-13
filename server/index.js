@@ -7,6 +7,7 @@ import {
   getDeviceInfo,
   listDevices,
   runAdb,
+  shellDragAndDrop,
   shellKey,
   shellSwipe,
   shellTap,
@@ -20,6 +21,8 @@ import {
   readSize,
   renderDemoFrame,
 } from './frame.js'
+import { fitRecordSize, looksLikeArgError, spawnScreenRecord } from './record.js'
+import { closeAllTouches, releaseTouch, touchEvent } from './touch.js'
 
 const DEMO_SERIAL = 'demo'
 
@@ -106,9 +109,11 @@ function getFrame(serial, id) {
   return hit ? hit.buffer : null
 }
 
-async function resolvePng(serial, frameId) {
+async function resolvePng(serial, frameId, { fresh = false } = {}) {
   const frame = getFrame(serial, frameId)
   if (frame) return frame
+  // 录屏模式下没有服务端帧缓冲，取色 / 找色一律现截一帧，保证像素无损
+  if (fresh) return getPng(serial, { force: true })
   // 环形缓冲被挤掉时，优先复用最近一次抓取结果，避免每次都重新截屏
   return getPng(serial, { maxAge: 2500 })
 }
@@ -313,7 +318,7 @@ async function handleApi(req, res, url) {
   if (p === '/api/pick' && req.method === 'POST') {
     const body = await readBody(req)
     const serial = body.serial || DEMO_SERIAL
-    const png = await resolvePng(serial, body.frameId)
+    const png = await resolvePng(serial, body.frameId, { fresh: !!body.fresh })
     const px = await readPixel(png, Number(body.x), Number(body.y))
     return sendJson(res, { ok: true, ...px })
   }
@@ -321,7 +326,7 @@ async function handleApi(req, res, url) {
   if (p === '/api/findColor' && req.method === 'POST') {
     const body = await readBody(req)
     const serial = body.serial || DEMO_SERIAL
-    const png = await resolvePng(serial, body.frameId)
+    const png = await resolvePng(serial, body.frameId, { fresh: !!body.fresh })
     const result = await findColorOnFrame(png, {
       color: body.color,
       threshold: body.threshold ?? 4,
@@ -351,6 +356,20 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ok: r.ok, message: r.message || 'swipe done' })
   }
 
+  // 长按拖拽（排序 / 拖放）：普通 swipe 的移动从按下就开始，长按计时会被打断，必须走 draganddrop
+  if (p === '/api/drag' && req.method === 'POST') {
+    const body = await readBody(req)
+    if (body.serial === DEMO_SERIAL) return sendJson(res, { ok: true, message: '演示模式：已模拟长按拖拽' })
+    const r = await shellDragAndDrop(body.serial, {
+      x1: Math.round(body.x1),
+      y1: Math.round(body.y1),
+      x2: Math.round(body.x2),
+      y2: Math.round(body.y2),
+      duration: Math.round(body.duration ?? 800),
+    })
+    return sendJson(res, { ok: r.ok, message: r.message || 'drag done' })
+  }
+
   if (p === '/api/key' && req.method === 'POST') {
     const body = await readBody(req)
     if (body.serial === DEMO_SERIAL) return sendJson(res, { ok: true, message: `演示模式：已模拟按键 ${body.key}` })
@@ -369,6 +388,16 @@ async function handleApi(req, res, url) {
 }
 
 /* ------------------------------ WebSocket 推流 ------------------------------ */
+/** 码率夹到 0.5 ~ 100 Mbps（100 Mbps 是本工具对外支持的上限），避免手滑填出离谱的值 */
+function clampBitrate(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return 100_000_000
+  return Math.max(500_000, Math.min(100_000_000, Math.round(n)))
+}
+
+/** 触控报错节流：拖动时每秒几十个事件，真出错了也只提示一次 */
+let touchErrorAt = 0
+
 function attachWebSocket(httpServer) {
   const wss = new WebSocketServer({ noServer: true })
 
@@ -384,18 +413,26 @@ function attachWebSocket(httpServer) {
   })
 
   wss.on('connection', (ws, req, url) => {
-    let serial = url.searchParams.get('serial') || DEMO_SERIAL
-    const levelParam = Number(url.searchParams.get('level'))
+    const q = url.searchParams
+    let serial = q.get('serial') || DEMO_SERIAL
+    const levelRaw = q.get('level')
+    const levelParam = levelRaw === null ? NaN : Number(levelRaw)
     const cfg = {
-      fps: Math.max(1, Math.min(10, Number(url.searchParams.get('fps')) || 2)),
-      scale: Math.max(1, Math.min(8, Math.round(Number(url.searchParams.get('scale')) || 3))),
+      mode: q.get('mode') === 'record' ? 'record' : 'screencap',
+      fps: Math.max(1, Math.min(10, Number(q.get('fps')) || 2)),
+      scale: Math.max(1, Math.min(8, Math.round(Number(q.get('scale')) || 3))),
       compressionLevel: Number.isFinite(levelParam) ? Math.max(0, Math.min(9, Math.round(levelParam))) : 3,
+      bitrate: clampBitrate(q.get('bitrate')),
       paused: false,
     }
+
     let closed = false
-    let lastFrameAt = 0
-    let smoothedFps = 0
-    let failCount = 0
+    /** 管道版本号：切设备 / 换来源 / 改录制参数时 +1，旧循环自行退出 */
+    let token = 0
+    let session = null // 当前 screenrecord 进程
+    let recordStyle = 'eq'
+    let recordFails = 0
+    let dropNoticed = false
 
     const send = (obj) => {
       if (!closed && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj))
@@ -409,51 +446,39 @@ function attachWebSocket(httpServer) {
       ws.send(Buffer.concat([header, metaBuf, pngFrame]), { binary: true })
     }
 
-    ws.on('message', (raw) => {
-      let msg
-      try {
-        msg = JSON.parse(raw.toString())
-      } catch {
-        return
-      }
-      if (msg.type === 'config') {
-        if (Number.isFinite(msg.fps)) cfg.fps = Math.max(0.5, Math.min(15, msg.fps))
-        if (Number.isFinite(msg.scale)) cfg.scale = Math.max(1, Math.min(6, Math.round(msg.scale)))
-        if (Number.isFinite(msg.level)) cfg.compressionLevel = Math.max(0, Math.min(9, Math.round(msg.level)))
-        if (msg.serial && msg.serial !== serial) {
-          serial = msg.serial
-          pngCache.delete(serial)
+    /** 录屏帧：4 字节头写 0（无 meta），后面全是 H.264 裸流 —— 前端据此走 WebCodecs 解码 */
+    const sendVideo = (chunk) => {
+      if (closed || ws.readyState !== ws.OPEN) return
+      if (ws.bufferedAmount > 8 * 1024 * 1024) {
+        if (!dropNoticed) {
+          dropNoticed = true
+          send({ type: 'record', state: 'warn', message: '前端接收过慢，已丢弃部分录屏数据' })
         }
-        send({ type: 'config', ...cfg, serial })
         return
       }
-      if (msg.type === 'pause') {
-        cfg.paused = true
-        send({ type: 'config', ...cfg, serial })
-        return
-      }
-      if (msg.type === 'resume') {
-        cfg.paused = false
-        send({ type: 'config', ...cfg, serial })
-        return
-      }
-      if (msg.type === 'snapshot') {
-        pngCache.delete(serial)
-        lastFrameAt = 0
-      }
-    })
+      const header = Buffer.alloc(4)
+      ws.send(Buffer.concat([header, chunk]), { binary: true })
+    }
 
-    ws.on('close', () => {
-      closed = true
-    })
-    ws.on('error', () => {
-      closed = true
-    })
+    /** 切换画面管道：旧的抓屏循环 / 录屏进程会因 token 变化自动收尾 */
+    function restartPipeline() {
+      token += 1
+      if (session) {
+        session.kill()
+        session = null
+      }
+      const my = token
+      if (cfg.mode === 'record' && serial !== DEMO_SERIAL) runRecordLoop(my)
+      else runCaptureLoop(my)
+    }
 
-    send({ type: 'ready', serial, ...cfg })
+    /* ------------------------- 画面来源 1：逐帧截图（screencap） ------------------------- */
+    async function runCaptureLoop(my) {
+      let lastFrameAt = 0
+      let smoothedFps = 0
+      let failCount = 0
 
-    ;(async () => {
-      while (!closed) {
+      while (!closed && my === token) {
         if (cfg.paused) {
           await sleep(150)
           continue
@@ -461,18 +486,18 @@ function attachWebSocket(httpServer) {
         const t0 = Date.now()
         try {
           const png = serial === DEMO_SERIAL ? await getPng(serial, { maxAge: 0, force: true }) : await capturePng(serial)
-          if (closed) break
+          if (closed || my !== token) break
           const frameId = storeFrame(serial, png)
           // 同步刷新缓存，使「取色 / 找色」在帧被淘汰时可秒回
           pngCache.set(serial, { at: Date.now(), promise: Promise.resolve(png) })
           const frame = await encodeFrame(png, { scale: cfg.scale, compressionLevel: cfg.compressionLevel })
+          if (closed || my !== token) break
           failCount = 0
           const now = Date.now()
           if (lastFrameAt) {
             const inst = 1000 / Math.max(1, now - lastFrameAt)
             smoothedFps = smoothedFps ? smoothedFps * 0.7 + inst * 0.3 : inst
           }
-          const capturedAt = now
           lastFrameAt = now
           sendFrame(frame.buffer, {
             serial,
@@ -483,6 +508,7 @@ function attachWebSocket(httpServer) {
             deviceHeight: frame.deviceHeight,
             scale: frame.scale,
             format: 'png',
+            mode: 'screencap',
             ts: now,
             cost: now - t0,
             fps: Number(smoothedFps.toFixed(1)),
@@ -512,7 +538,217 @@ function attachWebSocket(httpServer) {
         const elapsed = Date.now() - t0
         await sleep(Math.max(40, interval - elapsed))
       }
-    })()
+    }
+
+    /* ------------------------- 画面来源 2：屏幕录制（screenrecord） ------------------------- */
+    async function runRecordLoop(my) {
+      // 先量一次「当前旋转下的真实画面尺寸」：wm size 给的是面板物理尺寸，横屏时不换向，
+      // 直接拿它算 --size 会把画面压扁。截图拿到的尺寸才是设备正在输出的画面。
+      let display = null
+      try {
+        display = await readSize(await getPng(serial, { force: true }))
+      } catch {}
+      if (closed || my !== token) return
+
+      const deviceWidth = display?.width || 0
+      const deviceHeight = display?.height || 0
+      send({
+        type: 'record',
+        state: 'starting',
+        serial,
+        bitrate: cfg.bitrate,
+        deviceWidth,
+        deviceHeight,
+      })
+
+      while (!closed && my === token) {
+        const size = fitRecordSize(display, cfg.scale)
+        const startedAt = Date.now()
+        let bytes = 0
+        let stderr = ''
+        let killed = false
+        let announced = false
+
+        let child
+        try {
+          child = spawnScreenRecord(serial, { bitrate: cfg.bitrate, size, style: recordStyle })
+        } catch (err) {
+          send({ type: 'record', state: 'fatal', message: `无法启动 adb：${err.message}` })
+          return
+        }
+
+        session = {
+          kill() {
+            killed = true
+            try {
+              child.kill()
+            } catch {}
+          },
+        }
+
+        const done = new Promise((resolve) => {
+          child.on('error', (err) => resolve({ code: -1, stderr: err.message || String(err) }))
+          child.on('close', (code) => resolve({ code, stderr }))
+        })
+
+        child.stdout.on('data', (buf) => {
+          if (closed || my !== token) return
+          bytes += buf.length
+          if (!announced) {
+            announced = true
+            // 每一段录屏都从一个关键帧开始，通知前端重建解码器
+            send({
+              type: 'record',
+              state: 'stream',
+              width: size?.width || deviceWidth,
+              height: size?.height || deviceHeight,
+              deviceWidth,
+              deviceHeight,
+              bitrate: cfg.bitrate,
+            })
+          }
+          sendVideo(buf)
+        })
+        child.stderr.on('data', (buf) => {
+          stderr = (stderr + buf.toString('utf8')).slice(-1500)
+        })
+
+        const res = await done
+        const errText = (res.stderr || stderr || '').trim()
+        session = null
+        if (closed || my !== token) return
+
+        const lived = Date.now() - startedAt
+        if (bytes > 0) recordFails = 0
+        if (bytes > 0) dropNoticed = false
+
+        if (killed) {
+          // 参数变更 / 前端要求重建：直接续录
+          send({ type: 'record', state: 'restart', message: '画面参数已更新，重新开始录屏' })
+          continue
+        }
+        // 正常到点结束（--time-limit 上限 180s）：无缝续录
+        if (bytes > 0 && res.code === 0) {
+          send({ type: 'record', state: 'restart' })
+          await sleep(120)
+          continue
+        }
+        // 跑了一阵才挂：当成抖动，重开一次
+        if (bytes > 0 && lived >= 5000) {
+          send({ type: 'record', state: 'restart' })
+          await sleep(300)
+          continue
+        }
+
+        recordFails += 1
+        // 老版本 screenrecord 只认 --key value 写法，换个写法再试一次
+        if (bytes === 0 && recordFails <= 2 && looksLikeArgError(errText)) {
+          recordStyle = recordStyle === 'eq' ? 'two' : 'eq'
+          continue
+        }
+
+        let deviceGone = false
+        try {
+          const list = await listDevices()
+          deviceGone = !list.some((d) => d.serial === serial && d.state === 'device')
+        } catch {}
+
+        const message = errText || `screenrecord 退出（code ${res.code}）`
+        send({ type: 'record', state: 'error', message, deviceGone, bitrate: cfg.bitrate })
+
+        if (deviceGone) {
+          await sleep(1500)
+          continue
+        }
+        if (recordFails >= 3) {
+          send({ type: 'record', state: 'fatal', message })
+          return
+        }
+        await sleep(Math.min(2500, 500 * recordFails))
+      }
+    }
+
+    ws.on('message', (raw) => {
+      let msg
+      try {
+        msg = JSON.parse(raw.toString())
+      } catch {
+        return
+      }
+      if (msg.type === 'config') {
+        const prevMode = cfg.mode
+        const prevScale = cfg.scale
+        const prevBitrate = cfg.bitrate
+        const prevSerial = serial
+        if (Number.isFinite(msg.fps)) cfg.fps = Math.max(0.5, Math.min(15, msg.fps))
+        if (Number.isFinite(msg.scale)) cfg.scale = Math.max(1, Math.min(6, Math.round(msg.scale)))
+        if (Number.isFinite(msg.level)) cfg.compressionLevel = Math.max(0, Math.min(9, Math.round(msg.level)))
+        if (msg.bitrate !== undefined) cfg.bitrate = clampBitrate(msg.bitrate)
+        if (msg.mode === 'record' || msg.mode === 'screencap') cfg.mode = msg.mode
+        if (msg.serial && msg.serial !== serial) {
+          serial = msg.serial
+          pngCache.delete(serial)
+        }
+        send({ type: 'config', ...cfg, serial })
+        const dirty =
+          prevMode !== cfg.mode ||
+          prevSerial !== serial ||
+          (cfg.mode === 'record' && (prevScale !== cfg.scale || prevBitrate !== cfg.bitrate))
+        if (dirty) restartPipeline()
+        return
+      }
+      if (msg.type === 'pause') {
+        cfg.paused = true
+        send({ type: 'config', ...cfg, serial })
+        return
+      }
+      if (msg.type === 'resume') {
+        cfg.paused = false
+        send({ type: 'config', ...cfg, serial })
+        return
+      }
+      if (msg.type === 'snapshot') {
+        pngCache.delete(serial)
+        return
+      }
+      // 远程触控：down / move / up 直接写进同一个 adb shell，设备看到的是连续手势
+      if (msg.type === 'touch') {
+        if (serial === DEMO_SERIAL || !msg.phase) return
+        const r = touchEvent(serial, { phase: msg.phase, x: msg.x, y: msg.y })
+        // 拖动时事件很密，出错了只提示一次，免得刷屏
+        if (!r.ok && Date.now() - touchErrorAt > 5000) {
+          touchErrorAt = Date.now()
+          send({ type: 'error', message: `触控失败：${r.error}`, serial })
+        }
+        return
+      }
+      // 前端解码器出错时要求重建：杀掉当前录屏进程，下一段从关键帧重新开始
+      if (msg.type === 'record-restart') {
+        if (cfg.mode === 'record' && serial !== DEMO_SERIAL) restartPipeline()
+      }
+    })
+
+    ws.on('close', () => {
+      closed = true
+      token += 1
+      if (session) {
+        session.kill()
+        session = null
+      }
+      releaseTouch(serial)
+    })
+    ws.on('error', () => {
+      closed = true
+      token += 1
+      if (session) {
+        session.kill()
+        session = null
+      }
+      releaseTouch(serial)
+    })
+
+    send({ type: 'ready', serial, ...cfg })
+    restartPipeline()
   })
 
   return wss
@@ -557,6 +793,8 @@ export function adbHelperPlugin() {
         server.httpServer.keepAliveTimeout = 120000
         server.httpServer.headersTimeout = 125000
         attachWebSocket(server.httpServer)
+        // 退出时收掉触摸 shell，别在设备上留一个按住不放的手指
+        process.once('exit', closeAllTouches)
         server.config.logger.info('\n  \x1b[36m➜\x1b[0m  ADB 辅助服务已就绪：/api/*  ·  /ws/screen\n')
       }
       if (server.httpServer) attach()

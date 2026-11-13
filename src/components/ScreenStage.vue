@@ -11,6 +11,7 @@
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
+      @pointercancel="onPointerCancel"
       @pointerleave="onPointerLeave"
       @wheel="onWheel"
       @mousedown.right.prevent
@@ -29,6 +30,12 @@
         <el-icon><component :is="showToolbar ? 'Hide' : 'View'" /></el-icon>
       </button>
     </el-tooltip>
+
+    <!-- 远程触控提示：此时点击画面等于操作真机，不再是框选 / 取色 -->
+    <div v-if="liveTouch" class="live-touch-badge">
+      <el-icon><Pointer /></el-icon>
+      <span>{{ liveDragging ? '拖拽真机' : '点击真机' }}</span>
+    </div>
 
     <!-- 模式切换 -->
     <div v-if="showToolbar" class="stage-tools">
@@ -138,7 +145,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { formatColor, toHex } from '../utils/color'
 
 const props = defineProps({
@@ -158,6 +165,8 @@ const props = defineProps({
   colorFormat: { type: String, default: 'hex' },
   /** 框选冻结后，单击画面（不拖动）即恢复实时；可在设置里关闭 */
   clickResume: { type: Boolean, default: true },
+  /** 实时触控：把画面上的手势直接转发给真机（录屏模式用） */
+  liveTouch: { type: Boolean, default: false },
   emptyTitle: { type: String, default: '等待画面…' },
   emptyDesc: { type: String, default: '正在连接设备并拉取屏幕，稍候片刻' },
 })
@@ -171,6 +180,7 @@ const emit = defineEmits([
   'pick',
   'pick-offset',
   'interact',
+  'touch',
   'resume',
   'hover',
   'request-original',
@@ -189,11 +199,20 @@ const hoverDev = ref(null)
 const hoverEdge = ref(null)
 const hoverColor = ref('')
 const drag = ref(null)
+/** 实时触控的手势：按下时记起点，移动时按节奏把位置发给真机 */
+let liveGesture = null
+const liveDragging = ref(false)
+/** 位置节流：拖动时只保留最新位置，按 TOUCH_MOVE_MS 的节奏往外发 */
+let moveTimer = 0
+let pendingMove = null
+let lastMoveAt = 0
 const spaceDown = ref(false)
 
 let ctx = null
 let sourceCanvas = null
 let sourceCtx = null
+/** 当前帧还没同步到离屏 canvas（读像素前需要先重建） */
+let sourceDirty = true
 let rafId = 0
 let dpr = window.devicePixelRatio || 1
 
@@ -208,6 +227,12 @@ const MAX_ZOOM = 16
 const CLICK_SLOP = 8
 /** 新框选在屏幕上小于这个尺寸（CSS px）时，按单击处理，不保留碎框 */
 const MIN_SELECT_CSS = 10
+/**
+ * 远程触控的发送间隔（ms）。
+ * 实测设备侧一条 `input motionevent` 从写到 ack 约 98ms（执行 35ms + adb 往返），
+ * 服务端允许 3 条在途，所以这里 45ms 左右发一次既能跟手，也不会把指令堆在设备里。
+ */
+const TOUCH_MOVE_MS = 45
 
 const deviceW = computed(() => props.meta?.deviceWidth || 0)
 const deviceH = computed(() => props.meta?.deviceHeight || 0)
@@ -301,7 +326,11 @@ function schedule() {
   })
 }
 
-function rebuildSource() {
+/**
+ * 把当前帧画进离屏 canvas，供取色 / 放大镜做 getImageData。
+ * 只在真的要读像素时才做 —— 录屏 60fps 时每帧都拷一张 2880×1800 的图太贵了。
+ */
+function ensureSource() {
   if (!props.bitmap || !props.meta) {
     sourceCanvas = null
     sourceCtx = null
@@ -309,15 +338,21 @@ function rebuildSource() {
   }
   const w = props.meta.width
   const h = props.meta.height
-  if (!sourceCanvas) sourceCanvas = document.createElement('canvas')
-  // 尺寸没变就不要重设 width/height：那会重建整块像素缓冲区，高帧率下非常吃 CPU
+  if (!sourceCanvas) {
+    sourceCanvas = document.createElement('canvas')
+    sourceDirty = true
+  }
+  // 尺寸没变就不要重设 width/height：那会重建整块像素缓冲区，非常吃 CPU
   if (sourceCanvas.width !== w || sourceCanvas.height !== h) {
     sourceCanvas.width = w
     sourceCanvas.height = h
+    sourceDirty = true
   }
   if (!sourceCtx) sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true })
+  if (!sourceDirty) return
   sourceCtx.clearRect(0, 0, w, h)
   sourceCtx.drawImage(props.bitmap, 0, 0, w, h)
+  sourceDirty = false
 }
 
 /* ------------------------------ 绘制 ------------------------------ */
@@ -689,6 +724,7 @@ function drawCrosshair() {
 }
 
 function drawLoupe() {
+  ensureSource()
   if (!sourceCanvas || !props.meta) return
   const bScale = frameScale.value
   const bmpW = props.meta.width
@@ -778,6 +814,7 @@ function canvasPoint(ev) {
 }
 
 function pickHoverColor(devPt) {
+  ensureSource()
   if (!sourceCanvas || !sourceCtx || !props.meta) return ''
   const bScale = frameScale.value
   const px = Math.floor(devPt.x / bScale)
@@ -817,6 +854,30 @@ function clampPanValue(x, y) {
   }
 }
 
+/** 节流发送拖动位置：够间隔就立刻发，否则攒着按节奏补发最新位置（中间的点直接丢） */
+function queueTouchMove(p) {
+  pendingMove = p
+  const now = performance.now()
+  const wait = TOUCH_MOVE_MS - (now - lastMoveAt)
+  if (wait <= 0) flushTouchMove()
+  else if (!moveTimer) {
+    moveTimer = setTimeout(() => {
+      moveTimer = 0
+      flushTouchMove()
+    }, wait)
+  }
+}
+
+function flushTouchMove() {
+  clearTimeout(moveTimer)
+  moveTimer = 0
+  if (!pendingMove) return
+  const p = pendingMove
+  pendingMove = null
+  lastMoveAt = performance.now()
+  emit('touch', { phase: 'move', x: p.x, y: p.y })
+}
+
 function onPointerDown(ev) {
   // 还没有画面（等待设备 / 未载入图片）：不进入框选、取色或平移
   if (!hasFrame.value) return
@@ -833,6 +894,26 @@ function onPointerDown(ev) {
     return
   }
   if (ev.button !== 0) return
+
+  // 实时触控（录屏模式）：按下就立刻在真机上按下，之后的位置边拖边发，抬手再抬起，
+  // 期间不冻结、不取色、不框选
+  if (props.liveTouch) {
+    const o = origin.value
+    // 点在画面外的留白上不算，否则 screenToDev 会把坐标夹到边缘，变成一次莫名其妙贴边的点击
+    if (pt.x < o.x || pt.x > o.x + o.dw || pt.y < o.y || pt.y > o.y + o.dh) return
+    ev.preventDefault()
+    canvasRef.value.style.cursor = 'grabbing'
+    try {
+      canvasRef.value.setPointerCapture(ev.pointerId)
+    } catch {}
+    const start = { x: Math.round(dev.x), y: Math.round(dev.y) }
+    liveGesture = { startDev: start, lastDev: start, startClient: { x: ev.clientX, y: ev.clientY }, moved: false }
+    liveDragging.value = false
+    pendingMove = null
+    lastMoveAt = 0
+    emit('touch', { phase: 'down', x: start.x, y: start.y })
+    return
+  }
 
   if (props.mode === 'color') {
     emit('interact')
@@ -905,6 +986,24 @@ function onPointerMove(ev) {
   if (props.mode === 'color') hoverColor.value = pickHoverColor(hoverDev.value)
   // 把光标下的颜色一起抛出去：C 复制 / Shift 换格式不必先点出锚点
   emit('hover', { ...hoverEdge.value, hex: props.mode === 'color' ? hoverColor.value : '' })
+
+  // 实时触控：边拖边把位置发给真机（超过 8px 才算拖动，避免手抖把点击变成滑动）
+  if (props.liveTouch) {
+    if (liveGesture) {
+      const p = { x: Math.round(dev.x), y: Math.round(dev.y) }
+      liveGesture.lastDev = p
+      if (!liveGesture.moved) {
+        const moved = Math.hypot(ev.clientX - liveGesture.startClient.x, ev.clientY - liveGesture.startClient.y)
+        if (moved > CLICK_SLOP) {
+          liveGesture.moved = true
+          liveDragging.value = true
+        }
+      }
+      if (liveGesture.moved) queueTouchMove(p)
+    }
+    if (canvasRef.value) canvasRef.value.style.cursor = liveGesture ? 'grabbing' : 'pointer'
+    return
+  }
 
   const d = drag.value
   if (d) {
@@ -1003,6 +1102,25 @@ function resizeRegion(start, handle, dev) {
 }
 
 function onPointerUp(ev) {
+  // 实时触控：抬手就发 up（坐标用抬起点，最后一段位移不会丢）
+  if (liveGesture) {
+    liveGesture = null
+    liveDragging.value = false
+    clearTimeout(moveTimer)
+    moveTimer = 0
+    pendingMove = null
+    if (canvasRef.value) {
+      canvasRef.value.style.cursor = 'pointer'
+      try {
+        canvasRef.value.releasePointerCapture(ev.pointerId)
+      } catch {}
+    }
+    const pt = canvasPoint(ev)
+    const end = screenToDev(pt.x, pt.y)
+    emit('touch', { phase: 'up', x: Math.round(end.x), y: Math.round(end.y) })
+    return
+  }
+
   const d = drag.value
   if (d) {
     drag.value = null
@@ -1035,6 +1153,29 @@ function isTinySelection() {
   if (!r) return true
   const s = scale.value || 1
   return r.w * s < MIN_SELECT_CSS && r.h * s < MIN_SELECT_CSS
+}
+
+/** 手势被打断（切窗口 / 系统取消）：告诉真机取消这一次触摸，别让它一直按着 */
+function onPointerCancel(ev) {
+  if (liveGesture) {
+    const last = liveGesture.lastDev
+    liveGesture = null
+    liveDragging.value = false
+    clearTimeout(moveTimer)
+    moveTimer = 0
+    pendingMove = null
+    if (canvasRef.value) canvasRef.value.style.cursor = 'pointer'
+    try {
+      canvasRef.value?.releasePointerCapture(ev?.pointerId)
+    } catch {}
+    emit('touch', { phase: 'cancel', x: last.x, y: last.y })
+    return
+  }
+  // 框选 / 平移被打断：直接丢弃，别让 drag 卡住导致后续手势全部失灵
+  if (drag.value) {
+    drag.value = null
+    schedule()
+  }
 }
 
 function onPointerLeave() {
@@ -1205,14 +1346,16 @@ onBeforeUnmount(() => {
 
 watch(
   () => props.bitmap,
-  async (bmp) => {
+  (bmp) => {
     if (!bmp) {
       sourceCanvas = null
+      sourceCtx = null
+      sourceDirty = true
       schedule()
       return
     }
-    await nextTick()
-    rebuildSource()
+    // 只标脏、不立刻拷贝：真要读像素（放大镜 / 悬停取色）时才重建，录屏 60fps 时省掉每帧一次全图拷贝
+    sourceDirty = true
     schedule()
   },
   { immediate: true },
@@ -1253,6 +1396,27 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
 /* 等待画面时（设备还没出第一帧 / 图片还没载入）：保持普通箭头，不暗示可以框选 */
 .stage.no-frame .stage-canvas {
   cursor: default;
+}
+
+/* 远程触控提示条：贴在左上角「隐藏工具栏」按钮右边，不挡中间的浮动工具栏 */
+.live-touch-badge {
+  position: absolute;
+  top: 12px;
+  left: 48px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(14, 165, 160, 0.94);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 6px 18px rgba(13, 148, 136, 0.28);
+  z-index: 6;
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .overlay-toggle {
