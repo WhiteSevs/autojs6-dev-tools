@@ -10,6 +10,49 @@
       </span>
     </div>
 
+    <!-- 坐标输入：没有锚点时也能用，回车 / 粘贴即取该点颜色 -->
+    <div class="coord-box">
+      <div class="coord-head">
+        <span class="coord-title">
+          <el-icon><EditPen /></el-icon>
+          坐标输入
+        </span>
+        <span class="coord-sub">回车 / 粘贴即取色</span>
+        <button class="coord-paste" @click="readClipboard">
+          <el-icon><DocumentCopy /></el-icon>
+          <span>读剪贴板</span>
+        </button>
+      </div>
+      <div class="coord-row">
+        <el-input
+          v-model="coordText"
+          class="coord-input mono"
+          size="small"
+          placeholder="x, y"
+          @keydown.enter="applyCoord"
+          @paste="onPaste"
+          @focus="coordFocused = true"
+          @blur="coordFocused = false"
+        >
+          <template #suffix>
+            <el-icon
+              class="coord-clear"
+              aria-label="清空坐标并清除锚点"
+              @mousedown.prevent
+              @click.stop="clearCoord"
+            >
+              <CircleClose />
+            </el-icon>
+          </template>
+        </el-input>
+        <el-button size="small" type="primary" plain @click="applyCoord">取色</el-button>
+      </div>
+      <div class="coord-hint">
+        支持 <span class="mono">100, 200</span>、<span class="mono">[100, 200]</span> 与
+        <span class="mono">x=100 y=200</span>；粘区域坐标或一整段脚本也行，取前两个数字。留空回车可清除锚点。
+      </div>
+    </div>
+
     <template v-if="anchor">
       <div class="anchor-box">
         <button class="anchor-swatch" :style="{ background: swatchBg }" title="点击复制颜色" @click="copyColor" />
@@ -130,7 +173,7 @@
     </template>
 
     <div v-else class="empty-hint">
-      切换到「锚点取色」模式，在画面上单击<br />
+      在画面上单击，或在上方输入 / 粘贴坐标<br />
       即可读取该点的精确颜色与坐标
       <div class="hover-tip">
         只是把鼠标移上去、不点击也可以：<br />
@@ -141,11 +184,12 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CodeCard from './CodeCard.vue'
 import { copyText } from '../api'
 import { formatColor, formatExample, formatLabel, nextFormat, toHex } from '../utils/color'
+import { parsePoint } from '../utils/region'
 
 const props = defineProps({
   anchor: { type: Object, default: null },
@@ -156,9 +200,74 @@ const props = defineProps({
   result: { type: Object, default: null },
   loading: { type: Boolean, default: false },
   format: { type: String, default: 'hex' },
+  /** 画布尺寸：坐标输入会按它裁剪，避免填出画面外的点 */
+  deviceW: { type: Number, default: 0 },
+  deviceH: { type: Number, default: 0 },
 })
 
-const emit = defineEmits(['update:color', 'update:threshold', 'update:restrict', 'update:format', 'find', 'clear'])
+const emit = defineEmits(['update:color', 'update:threshold', 'update:restrict', 'update:format', 'find', 'clear', 'pick'])
+
+/* ------------------------------ 坐标输入 ------------------------------ */
+const coordText = ref('')
+const coordFocused = ref(false)
+
+/** 锚点变了就回填输入框（画面上单击取色、清除锚点都会走到这里）；正在输入时不打断 */
+watch(
+  () => props.anchor,
+  (a) => {
+    if (coordFocused.value) return
+    coordText.value = a ? `${a.x}, ${a.y}` : ''
+  },
+  { immediate: true },
+)
+
+/** 手输 / 粘贴的坐标 → 让 App 去这一取色（和画面上单击等价） */
+function applyCoord() {
+  const text = String(coordText.value ?? '').trim()
+  if (!text) {
+    // 留空回车 = 清除锚点，和输入框右侧的 × 一致
+    emit('clear')
+    return
+  }
+  const res = parsePoint(text, { width: props.deviceW, height: props.deviceH })
+  if (!res.ok) {
+    ElMessage.warning(res.error)
+    return
+  }
+  coordText.value = `${res.point.x}, ${res.point.y}`
+  emit('pick', res.point)
+}
+
+/** 粘贴时先尝试解析：能解析就直接取色，解析不了就让文本正常进输入框再手改 */
+function onPaste(ev) {
+  const text = ev.clipboardData?.getData('text') || ''
+  if (!text.trim()) return
+  const res = parsePoint(text, { width: props.deviceW, height: props.deviceH })
+  if (!res.ok) return
+  ev.preventDefault()
+  coordText.value = `${res.point.x}, ${res.point.y}`
+  emit('pick', res.point)
+}
+
+async function readClipboard() {
+  try {
+    if (!navigator.clipboard?.readText) throw new Error('浏览器不允许读取剪贴板，请直接 Ctrl+V 粘贴')
+    const text = await navigator.clipboard.readText()
+    if (!text?.trim()) {
+      ElMessage.info('剪贴板里没有文本')
+      return
+    }
+    coordText.value = text.trim()
+    applyCoord()
+  } catch (err) {
+    ElMessage.warning(err.message || '读取剪贴板失败，请直接 Ctrl+V 粘贴')
+  }
+}
+
+function clearCoord() {
+  coordText.value = ''
+  emit('clear')
+}
 
 const decimalHex = computed(() => {
   if (!props.anchor) return '000000'

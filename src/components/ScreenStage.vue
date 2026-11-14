@@ -31,12 +31,6 @@
       </button>
     </el-tooltip>
 
-    <!-- 远程触控提示：此时点击画面等于操作真机，不再是框选 / 取色 -->
-    <div v-if="liveTouch" class="live-touch-badge">
-      <el-icon><Pointer /></el-icon>
-      <span>{{ liveDragging ? '拖拽真机' : '点击真机' }}</span>
-    </div>
-
     <!-- 模式切换 -->
     <div v-if="showToolbar" class="stage-tools">
       <div class="seg">
@@ -110,7 +104,7 @@
           <span><b>拖拽</b>框选</span>
           <span class="dot">·</span>
           <span>框内拖动移动，边角缩放</span>
-          <template v-if="clickResume && frozen">
+          <template v-if="autoResume && frozen">
             <span class="dot">·</span>
             <span v-if="region"><b>单击</b>选区外取消框选并恢复实时</span>
             <span v-else><b>单击</b>画面恢复实时</span>
@@ -163,8 +157,8 @@ const props = defineProps({
   panMode: { type: Boolean, default: false },
   showToolbar: { type: Boolean, default: true },
   colorFormat: { type: String, default: 'hex' },
-  /** 框选冻结后，单击画面（不拖动）即恢复实时；可在设置里关闭 */
-  clickResume: { type: Boolean, default: true },
+  /** 自动恢复实时画面：冻结后单击画面（不拖动）即取消框选并恢复实时；可在设置里关闭 */
+  autoResume: { type: Boolean, default: true },
   /** 实时触控：把画面上的手势直接转发给真机（录屏模式用） */
   liveTouch: { type: Boolean, default: false },
   emptyTitle: { type: String, default: '等待画面…' },
@@ -201,7 +195,6 @@ const hoverColor = ref('')
 const drag = ref(null)
 /** 实时触控的手势：按下时记起点，移动时按节奏把位置发给真机 */
 let liveGesture = null
-const liveDragging = ref(false)
 /** 位置节流：拖动时只保留最新位置，按 TOUCH_MOVE_MS 的节奏往外发 */
 let moveTimer = 0
 let pendingMove = null
@@ -908,7 +901,6 @@ function onPointerDown(ev) {
     } catch {}
     const start = { x: Math.round(dev.x), y: Math.round(dev.y) }
     liveGesture = { startDev: start, lastDev: start, startClient: { x: ev.clientX, y: ev.clientY }, moved: false }
-    liveDragging.value = false
     pendingMove = null
     lastMoveAt = 0
     emit('touch', { phase: 'down', x: start.x, y: start.y })
@@ -938,7 +930,7 @@ function onPointerDown(ev) {
   const inImage = sx >= o.x && sx <= o.x + o.dw && sy >= o.y && sy <= o.y + o.dh
   const type = handle ? 'resize' : inImage && insideRegion(dev) ? 'move' : 'new'
 
-  if (props.clickResume) {
+  if (props.autoResume) {
     // 先不动手：等确认是真的在拖拽再冻结画面 / 清空旧区域，
     // 这样「单击画面」可以继续用来恢复实时（见 onPointerUp）
     drag.value = {
@@ -987,6 +979,19 @@ function onPointerMove(ev) {
   // 把光标下的颜色一起抛出去：C 复制 / Shift 换格式不必先点出锚点
   emit('hover', { ...hoverEdge.value, hex: props.mode === 'color' ? hoverColor.value : '' })
 
+  // 平移优先于实时触控：放大后要靠右键（或中键 / Alt / 空格）拖着画面看别处，
+  // 这条必须排在 liveTouch 分支之前，否则右键按下虽然进了 pan，移动却全被触控分支拦掉
+  const panDrag = drag.value
+  if (panDrag && panDrag.type === 'pan') {
+    pan.value = clampPanValue(
+      panDrag.startPan.x + (ev.clientX - panDrag.startClient.x),
+      panDrag.startPan.y + (ev.clientY - panDrag.startClient.y),
+    )
+    canvas.style.cursor = 'grabbing'
+    schedule()
+    return
+  }
+
   // 实时触控：边拖边把位置发给真机（超过 8px 才算拖动，避免手抖把点击变成滑动）
   if (props.liveTouch) {
     if (liveGesture) {
@@ -994,10 +999,7 @@ function onPointerMove(ev) {
       liveGesture.lastDev = p
       if (!liveGesture.moved) {
         const moved = Math.hypot(ev.clientX - liveGesture.startClient.x, ev.clientY - liveGesture.startClient.y)
-        if (moved > CLICK_SLOP) {
-          liveGesture.moved = true
-          liveDragging.value = true
-        }
+        if (moved > CLICK_SLOP) liveGesture.moved = true
       }
       if (liveGesture.moved) queueTouchMove(p)
     }
@@ -1105,7 +1107,6 @@ function onPointerUp(ev) {
   // 实时触控：抬手就发 up（坐标用抬起点，最后一段位移不会丢）
   if (liveGesture) {
     liveGesture = null
-    liveDragging.value = false
     clearTimeout(moveTimer)
     moveTimer = 0
     pendingMove = null
@@ -1127,11 +1128,11 @@ function onPointerUp(ev) {
     if (d.pending) {
       // 没有拖动 = 一次单击：
       // 只有单击「选区外」才取消框选并恢复实时；单击选区内属于选中状态的操作区，不做任何处理
-      if (props.clickResume && props.mode === 'region' && d.type === 'new') {
+      if (props.autoResume && props.mode === 'region' && d.type === 'new') {
         if (props.frozen) emit('resume')
         emit('clear-region')
       }
-    } else if (props.clickResume && props.mode === 'region' && d.type === 'new' && isTinySelection()) {
+    } else if (props.autoResume && props.mode === 'region' && d.type === 'new' && isTinySelection()) {
       // 拖出来的框小到没有意义（手抖 / 误触），按单击处理：取消碎框并恢复实时
       if (props.frozen) emit('resume')
       emit('clear-region')
@@ -1141,7 +1142,10 @@ function onPointerUp(ev) {
     }
     schedule()
   }
-  if (canvasRef.value) canvasRef.value.style.cursor = props.panMode ? 'grab' : ''
+  if (canvasRef.value) {
+    // 实时触控下松手回到「可点击真机」的光标，而不是框选模式的默认箭头
+    canvasRef.value.style.cursor = props.liveTouch ? 'pointer' : props.panMode ? 'grab' : ''
+  }
   try {
     canvasRef.value.releasePointerCapture(ev.pointerId)
   } catch {}
@@ -1160,7 +1164,6 @@ function onPointerCancel(ev) {
   if (liveGesture) {
     const last = liveGesture.lastDev
     liveGesture = null
-    liveDragging.value = false
     clearTimeout(moveTimer)
     moveTimer = 0
     pendingMove = null
@@ -1396,27 +1399,6 @@ watch(() => [props.meta?.deviceWidth, props.meta?.deviceHeight], schedule)
 /* 等待画面时（设备还没出第一帧 / 图片还没载入）：保持普通箭头，不暗示可以框选 */
 .stage.no-frame .stage-canvas {
   cursor: default;
-}
-
-/* 远程触控提示条：贴在左上角「隐藏工具栏」按钮右边，不挡中间的浮动工具栏 */
-.live-touch-badge {
-  position: absolute;
-  top: 12px;
-  left: 48px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(14, 165, 160, 0.94);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  box-shadow: 0 6px 18px rgba(13, 148, 136, 0.28);
-  z-index: 6;
-  pointer-events: none;
-  white-space: nowrap;
 }
 
 .overlay-toggle {

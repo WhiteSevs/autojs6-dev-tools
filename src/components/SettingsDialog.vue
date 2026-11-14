@@ -30,23 +30,15 @@
 
         <div class="set-row">
           <div class="set-text">
-            <div class="set-label">单击恢复实时</div>
+            <div class="set-label">自动恢复实时画面</div>
             <div class="set-desc">
-              框选会冻结画面；冻结后<strong>单击选区外</strong>即取消框选并恢复实时，单击选区内不做处理（保持冻结，方便拖动 / 缩放选区）。
-              若这一次是拖拽，则重新框选并冻结。关闭后改为按下鼠标立刻冻结，单击不再恢复。
+              框选 / 取色会冻结画面，取消时自动恢复实时：<strong>单击选区外</strong>、按 <strong>Esc</strong> /
+              <strong>Delete</strong>、或点右侧「清空」都会解除冻结（单击选区内保持冻结，方便拖动 / 缩放选区）。
+              开启后切换模式也会跟着调：带着锚点切到「区域框选」恢复实时，切回「锚点取色」重新冻结。
+              关闭后改为按下鼠标立刻冻结，且不再自动恢复。
             </div>
           </div>
-          <el-switch :model-value="clickResume" @update:model-value="(v) => emit('update:clickResume', v)" />
-        </div>
-
-        <div class="set-row">
-          <div class="set-text">
-            <div class="set-label">取消框选后恢复实时</div>
-            <div class="set-desc">
-              按 Esc / Delete 或点右侧「清空」移除区域时，自动解除画面冻结、恢复实时刷新（默认关闭）
-            </div>
-          </div>
-          <el-switch :model-value="resumeOnClear" @update:model-value="(v) => emit('update:resumeOnClear', v)" />
+          <el-switch :model-value="autoResume" @update:model-value="(v) => emit('update:autoResume', v)" />
         </div>
 
         <div class="set-row">
@@ -175,8 +167,8 @@ const props = defineProps({
   colorFormat: { type: String, default: 'hex' },
   coordFormat: { type: String, default: 'bracket' },
   coordTemplate: { type: String, default: DEFAULT_COORD_TEMPLATE },
-  clickResume: { type: Boolean, default: true },
-  resumeOnClear: { type: Boolean, default: false },
+  /** 自动恢复实时画面：取消框选（单击 / Esc / 清空）后解除冻结 */
+  autoResume: { type: Boolean, default: true },
   env: { type: Object, default: null },
 })
 
@@ -186,8 +178,7 @@ const emit = defineEmits([
   'update:colorFormat',
   'update:coordFormat',
   'update:coordTemplate',
-  'update:clickResume',
-  'update:resumeOnClear',
+  'update:autoResume',
 ])
 
 const tab = ref('general')
@@ -214,7 +205,7 @@ const SHORTCUTS = [
     group: '区域框选',
     items: [
       { keys: ['拖拽'], desc: '拖出一个新区域' },
-      { keys: ['单击'], desc: '单击选区外取消框选并恢复实时；单击选区内不做处理，画面保持冻结' },
+      { keys: ['单击'], desc: '单击选区外取消框选；开启「自动恢复实时画面」时一并恢复实时，单击选区内保持冻结' },
       { keys: ['Ctrl', 'V'], desc: '粘贴坐标文本直接框选（[x, y, w, h] / x= y= w= h=），输入框内粘贴同样生效' },
       { keys: ['框内拖动'], desc: '整体移动区域' },
       { keys: ['拖动边角'], desc: '缩放区域（八向控制点）' },
@@ -242,6 +233,7 @@ const SHORTCUTS = [
       { keys: ['1'], desc: '切换到区域框选' },
       { keys: ['2'], desc: '切换到锚点取色' },
       { keys: ['R'], desc: '恢复实时画面' },
+      { keys: ['L'], desc: '开启 / 关闭「实时点击」（远程触控，需先切到录屏画面）' },
       { keys: ['Ctrl', 'S'], desc: '保存截图（有区域存区域，否则整屏）' },
       { keys: ['Ctrl', 'C'], desc: '复制截图到剪贴板（有区域复制区域）' },
       { keys: ['拖入图片'], desc: '把本地图片拖到画面即可切换为图片模式' },

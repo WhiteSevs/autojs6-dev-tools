@@ -58,11 +58,9 @@
           </el-select>
 
           <div class="hb-btns">
-            <el-tooltip content="刷新设备列表" :placement="tipPlacement">
-              <el-button :loading="loadingDevices" circle @click="refreshDevices()">
-                <el-icon v-if="!loadingDevices"><Refresh /></el-icon>
-              </el-button>
-            </el-tooltip>
+            <el-button :loading="loadingDevices" circle @click="refreshDevices()">
+              <el-icon v-if="!loadingDevices"><Refresh /></el-icon>
+            </el-button>
 
             <el-popover
               v-model:visible="connectOpen"
@@ -178,16 +176,14 @@
 
             <div class="hb-field">
               <label>实时</label>
-              <el-tooltip :content="frozen ? '恢复实时画面' : '冻结当前画面，便于精确框选'" :placement="tipPlacement">
-                <el-switch
-                  :model-value="!frozen"
-                  inline-prompt
-                  active-text="实时"
-                  inactive-text="冻结"
-                  style="--el-switch-on-color: #0ea5a0"
-                  @change="(v) => (v ? resumeLive() : freezeFrame())"
-                />
-              </el-tooltip>
+              <el-switch
+                :model-value="!frozen"
+                inline-prompt
+                active-text="实时"
+                inactive-text="冻结"
+                style="--el-switch-on-color: #0ea5a0"
+                @change="(v) => (v ? resumeLive() : freezeFrame())"
+              />
             </div>
 
             <div class="hb-field">
@@ -258,7 +254,7 @@
             :bbox="mode === 'color' ? bbox : null"
             :frozen="frozen && !imageMode"
             :color-format="colorFormat"
-            :click-resume="clickResume"
+            :auto-resume="autoResume"
             :live-touch="liveTouch"
             :empty-title="imageMode ? '还没有载入图片' : '等待画面…'"
             :empty-desc="
@@ -310,12 +306,15 @@
             :result="findResult"
             :loading="finding"
             :format="colorFormat"
+            :device-w="deviceW"
+            :device-h="deviceH"
             @update:color="(v) => (searchColor = v)"
             @update:threshold="onThreshold"
             @update:restrict="onRestrict"
             @update:format="setColorFormat"
             @find="runFind"
-            @clear="clearAnchor"
+            @clear="clearAnchorAndResume"
+            @pick="onPick"
           />
           <DevicePanel
             v-if="!imageMode"
@@ -418,15 +417,13 @@
       :color-format="colorFormat"
       :coord-format="coordFormat"
       :coord-template="coordTemplate"
-      :click-resume="clickResume"
-      :resume-on-clear="resumeOnClear"
+      :auto-resume="autoResume"
       :env="env"
       @update:toolbar="setToolbarDefault"
       @update:color-format="setColorFormat"
       @update:coord-format="setCoordFormat"
       @update:coord-template="setCoordTemplate"
-      @update:click-resume="setClickResume"
-      @update:resume-on-clear="setResumeOnClear"
+      @update:auto-resume="setAutoResume"
     />
   </div>
 </template>
@@ -546,10 +543,12 @@ const settingsOpen = ref(false)
 const colorFormat = ref(readColorFormat())
 const coordFormat = ref(readCoordFormat())
 const coordTemplate = ref(readCoordTemplate())
-/** 框选冻结后单击画面恢复实时：默认开启 */
-const clickResume = ref(readClickResume())
-/** 取消框选（Esc / Delete / 清空）后恢复实时：默认关闭 */
-const resumeOnClear = ref(readResumeOnClear())
+/**
+ * 自动恢复实时画面：取消框选（单击画面 / Esc / Delete / 右侧「清空」）后自动解除冻结。
+ * 原本拆成「单击恢复实时」和「取消框选后恢复实时」两个开关，行为重叠、用户也分不清，
+ * 已合并为这一个开关，默认开启。
+ */
+const autoResume = ref(readAutoResume())
 /** 画面来源：shot = 逐帧截图（screencap），record = 屏幕录制（screenrecord） */
 const frameSource = ref(readFrameSource())
 /** 录屏码率（bps），截图模式不生效 */
@@ -645,18 +644,28 @@ function setToolbarDefault(v) {
   } catch {}
 }
 
-function readClickResume() {
+const AUTO_RESUME_KEY = 'autojs6.autoResumeLive'
+
+/**
+ * 合并前是两个键：clickResumeLive（单击恢复，默认开）、resumeOnRegionClear（取消框选恢复，默认关）。
+ * 新键还没写过时按旧值迁移：两个都关着才算关，否则保持默认开启。
+ */
+function readAutoResume() {
   try {
-    return localStorage.getItem('autojs6.clickResumeLive') !== '0'
+    const saved = localStorage.getItem(AUTO_RESUME_KEY)
+    if (saved != null) return saved !== '0'
+    const legacyClick = localStorage.getItem('autojs6.clickResumeLive')
+    const legacyClear = localStorage.getItem('autojs6.resumeOnRegionClear')
+    return !(legacyClick === '0' && legacyClear !== '1')
   } catch {
     return true
   }
 }
 
-function setClickResume(v) {
-  clickResume.value = !!v
+function setAutoResume(v) {
+  autoResume.value = !!v
   try {
-    localStorage.setItem('autojs6.clickResumeLive', v ? '1' : '0')
+    localStorage.setItem(AUTO_RESUME_KEY, v ? '1' : '0')
   } catch {}
 }
 
@@ -679,14 +688,6 @@ function setCoordTemplate(v) {
   try {
     localStorage.setItem('autojs6.coordTemplate', coordTemplate.value)
   } catch {}
-}
-
-function readResumeOnClear() {
-  try {
-    return localStorage.getItem('autojs6.resumeOnRegionClear') === '1'
-  } catch {
-    return false
-  }
 }
 
 function readFrameSource() {
@@ -735,13 +736,6 @@ function setFrameSource(next) {
   }
 }
 
-function setResumeOnClear(v) {
-  resumeOnClear.value = !!v
-  try {
-    localStorage.setItem('autojs6.resumeOnRegionClear', resumeOnClear.value ? '1' : '0')
-  } catch {}
-}
-
 function toggleRail() {
   railCollapsed.value = !railCollapsed.value
   try {
@@ -772,11 +766,11 @@ function setRegion(v) {
 
 /**
  * 取消框选（Esc / Delete / 右侧「清空」按钮）：
- * 开启「取消框选后恢复实时」且当前处于冻结状态时，自动恢复实时画面。
+ * 开启「自动恢复实时画面」且当前处于冻结状态时，自动恢复实时画面。
  */
 function clearRegion() {
   region.value = null
-  if (resumeOnClear.value && !imageMode.value && frozen.value) {
+  if (autoResume.value && !imageMode.value && frozen.value) {
     resumeLive()
   }
 }
@@ -988,6 +982,24 @@ function onFreezeAction() {
   else resumeLive()
 }
 
+/**
+ * 模式切换时的画面状态：区域框选要看实时画面，锚点取色要有稳定画面才能取准。
+ * 只在「自动恢复实时画面」开启、且不是设备掉线冻结时介入；图片模式没有实时流，不处理。
+ */
+function syncFreezeOnModeChange(next, prev) {
+  if (!autoResume.value || imageMode.value) return
+  if (frozenReason.value === 'lost') return
+  if (next === 'region' && prev === 'color') {
+    // 带着锚点从取色切回框选：之前的冻结是取色的产物，先恢复实时
+    if (frozen.value && anchor.value) resumeLive()
+    return
+  }
+  if (next === 'color' && prev === 'region') {
+    // 带着锚点切回取色：冻住画面，保证「看到的像素」就是「取到的像素」
+    if (anchor.value && !frozen.value) freezeFrame()
+  }
+}
+
 /** 建立 / 重建投屏连接所需的全部参数（画面来源与码率也在里面） */
 function streamOptions() {
   return {
@@ -1024,6 +1036,19 @@ function clearAnchor() {
   anchor.value = null
   searchColor.value = ''
   findResult.value = null
+}
+
+/**
+ * 用户主动清除锚点（「清除锚点」按钮 / 输入框的 × / 留空回车）：
+ * 开启「自动恢复实时画面」时解除冻结 —— 但只在**没有区域框选**时这么做。
+ * 还留着区域说明还在按这块区域干活（比如「仅在区域内找色」），画面得继续冻着，
+ * 否则区域和实时画面会对不上。切设备 / 载入图片走的是 clearAnchor()，不在这里恢复。
+ */
+function clearAnchorAndResume() {
+  clearAnchor()
+  if (autoResume.value && !imageMode.value && frozen.value && !region.value) {
+    resumeLive()
+  }
 }
 
 /** 点「原画 1:1」时，若当前传输是缩放图，顺手切回原画，保证真的是 1 像素对 1 像素 */
@@ -1323,6 +1348,12 @@ function onGlobalKeydown(e) {
       copyCoord()
     }
   }
+
+  // L：开关远程触控的「实时点击」，不用把手从画面上挪开
+  if (!mod && !e.altKey && !e.shiftKey && key === 'l') {
+    e.preventDefault()
+    toggleLiveTouchByKey()
+  }
 }
 
 function onGlobalKeyup(e) {
@@ -1426,8 +1457,9 @@ watch(region, (val) => {
   }
 })
 
-watch(mode, (val) => {
+watch(mode, (val, old) => {
   if (val !== 'region') offsetPicking.value = false
+  syncFreezeOnModeChange(val, old)
 })
 
 /* ------------------------------ 取色与找色 ------------------------------ */
@@ -1445,8 +1477,16 @@ function setLiveTouch(on) {
     return
   }
   liveTouch.value = true
+  // 触控是「看着实时画面点真机」，和框选互斥：还留着选区的话，点画面到底是操作真机
+  // 还是继续折腾选区会有歧义，所以进触控前先把框选收掉（clearRegion 会按设置恢复实时）
+  if (region.value) clearRegion()
   // 触控要看着实时画面点，顺手把冻结解掉
   if (frozen.value) resumeLive()
+}
+
+/** L：开关「实时点击」，和右侧「设备与操作 → 远程触控」那个按钮等价 */
+function toggleLiveTouchByKey() {
+  setLiveTouch(!liveTouch.value)
 }
 
 /**

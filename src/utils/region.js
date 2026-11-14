@@ -144,3 +144,40 @@ export function formatRegionText(region) {
   if (!region) return ''
   return `[${region.x}, ${region.y}, ${region.w}, ${region.h}]`
 }
+
+/**
+ * 锚点坐标解析：把「手输 / 粘贴进来的文本」还原成一个设备坐标点。
+ *
+ * 支持的形式（与区域解析一致，数字可带小数、全角标点会自动纠正）：
+ *   [100, 200]      100, 200      100 200      x=100 y=200      x: 100, y: 200
+ * 直接粘区域坐标 [x, y, w, h] 或一整段脚本也能用：只取前两个数字当锚点。
+ *
+ * @param {string} text
+ * @param {object} opts
+ * @param {number} [opts.width]  画布宽（设备物理像素），传 0 表示不裁剪
+ * @param {number} [opts.height] 画布高
+ * @returns {{ok:true, point:{x:number,y:number}} | {ok:false, error:string}}
+ */
+export function parsePoint(text, { width = 0, height = 0 } = {}) {
+  const raw = normalizeRegionText(text)
+  if (!raw) return { ok: false, error: '请先输入或粘贴坐标，例如 100, 200' }
+
+  let x = readLabeled(raw, LABELS.x)
+  let y = readLabeled(raw, LABELS.y)
+
+  if (x == null || y == null) {
+    const nums = (raw.match(NUMBER) || []).map(Number)
+    if (nums.length < 2) {
+      return { ok: false, error: '需要一对坐标，例如 100, 200 或 x=100 y=200' }
+    }
+    if (x == null) x = nums[0]
+    if (y == null) y = nums[1]
+  }
+
+  let nx = Math.round(x)
+  let ny = Math.round(y)
+  if (width > 0) nx = clampInt(nx, 0, Math.max(0, width - 1))
+  if (height > 0) ny = clampInt(ny, 0, Math.max(0, height - 1))
+  return { ok: true, point: { x: nx, y: ny } }
+}
+

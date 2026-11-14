@@ -28,16 +28,12 @@
     </div>
 
     <div class="op-row">
-      <el-tooltip content="按设备原始像素保存整屏（Ctrl / ⌘ + S）" placement="top">
-        <el-button size="small" :loading="saving" @click="saveShot">
-          <el-icon><Download /></el-icon>&nbsp;保存整屏
-        </el-button>
-      </el-tooltip>
-      <el-tooltip :content="anchor ? `点击 ${anchor.x}, ${anchor.y}` : '先在画面上拾取锚点'" placement="top">
-        <el-button size="small" :disabled="!anchor || isDemo" @click="tapAnchor">
-          <el-icon><Pointer /></el-icon>&nbsp;点击锚点
-        </el-button>
-      </el-tooltip>
+      <el-button size="small" :loading="saving" @click="saveShot">
+        <el-icon><Download /></el-icon>&nbsp;保存整屏
+      </el-button>
+      <el-button size="small" :disabled="!anchor || isDemo" @click="tapAnchor">
+        <el-icon><Pointer /></el-icon>&nbsp;点击锚点
+      </el-button>
       <el-button size="small" :disabled="isDemo" @click="sendKey('back')">返回</el-button>
       <el-button size="small" :disabled="isDemo" @click="sendKey('home')">Home</el-button>
       <el-button size="small" :disabled="isDemo" @click="sendKey('recents')">任务</el-button>
@@ -54,20 +50,15 @@
         </span>
       </div>
       <div class="op-row">
-        <el-tooltip
-          content="开启后画面就是触摸板：按下即按下、拖动实时跟随、松开即抬起（单击 / 长按 / 拖拽 / 滑动都能用）"
-          placement="top"
+        <el-button
+          size="small"
+          :type="liveTouch ? 'primary' : ''"
+          :plain="!liveTouch"
+          :disabled="!recordMode"
+          @click="toggleLiveTouch"
         >
-          <el-button
-            size="small"
-            :type="liveTouch ? 'primary' : ''"
-            :plain="!liveTouch"
-            :disabled="!recordMode"
-            @click="toggleLiveTouch"
-          >
-            <el-icon><Pointer /></el-icon>&nbsp;实时点击
-          </el-button>
-        </el-tooltip>
+          <el-icon><Pointer /></el-icon>&nbsp;实时点击
+        </el-button>
         <el-button v-if="liveTouch" size="small" text @click="emit('update:liveTouch', false)">退出触控</el-button>
       </div>
       <div v-if="liveTouch" class="touch-tips">
