@@ -45,11 +45,27 @@
             </el-icon>
           </template>
         </el-input>
+        <el-input
+          v-model="offsetText"
+          class="coord-offset mono"
+          :class="{ 'is-dirty': hasOffset }"
+          size="small"
+          placeholder="Δx, Δy"
+          title="偏移量 [Δx, Δy]：框选结果 = 左侧坐标 + 偏移量"
+          @keydown.enter="applyCoord"
+          @focus="coordFocused = true"
+          @blur="coordFocused = false"
+        />
         <el-button size="small" type="primary" plain @click="applyCoord">框选</el-button>
+      </div>
+      <div v-if="hasOffset && region" class="coord-offset-hint mono">
+        基准 {{ coordBaseText }} ＋ 偏移 ({{ signed(offset.x) }}, {{ signed(offset.y) }}) → 实际
+        {{ formatRegionText(region) }}
       </div>
       <div class="coord-hint">
         支持 <span class="mono">[x, y, w, h]</span>、<span class="mono">x, y, w, h</span> 与
-        <span class="mono">x= y= w= h=</span> 标签；只给 x / y 时按当前尺寸平移。留空回车 / 点 × 可清除框选并恢复实时。
+        <span class="mono">x= y= w= h=</span> 标签；只给 x / y 时按当前尺寸平移。右侧可填偏移量
+        <span class="mono">[Δx, Δy]</span>（可负），框选结果 = 输入坐标 + 偏移量。留空回车 / 点 × 可清除框选并恢复实时。
       </div>
     </div>
 
@@ -212,7 +228,7 @@ import { ElMessage } from 'element-plus'
 import CodeCard from './CodeCard.vue'
 import RegionPreview from './RegionPreview.vue'
 import { copyImageToClipboard, copyText, downloadBlob, shotBlob } from '../api'
-import { formatRegionText, parseRegion } from '../utils/region'
+import { formatRegionText, parsePoint, parseRegion } from '../utils/region'
 
 const props = defineProps({
   region: { type: Object, default: null },
@@ -233,24 +249,65 @@ const saving = ref('')
 /* ------------------------------ 坐标输入 ------------------------------ */
 const coordText = ref('')
 const coordFocused = ref(false)
+/** 偏移量输入：框选结果 = 坐标输入 + 偏移量 */
+const offsetText = ref('')
 
-/** 拖动 / 改数值时同步输入框，方便看清楚现在是哪一段；正在输入时不打断 */
+/** 解析偏移量（允许负数，不裁剪到屏幕内）；留空视为 0, 0 */
+function readOffset() {
+  const text = String(offsetText.value ?? '').trim()
+  if (!text) return { ok: true, x: 0, y: 0 }
+  // 不传宽高：parsePoint 就不会把负偏移裁到 0 以上
+  const res = parsePoint(text)
+  if (!res.ok) return { ok: false, error: `偏移量解析失败：${res.error}` }
+  return { ok: true, x: res.point.x, y: res.point.y }
+}
+
+const offset = computed(() => {
+  const res = readOffset()
+  return res.ok ? { x: res.x, y: res.y } : { x: 0, y: 0 }
+})
+
+const hasOffset = computed(() => offset.value.x !== 0 || offset.value.y !== 0)
+
+/** 区域减掉偏移，得到输入框里应显示的「基准坐标」 */
+function baseRegion(region, off = offset.value) {
+  if (!region) return null
+  return { ...region, x: region.x - off.x, y: region.y - off.y }
+}
+
+const coordBaseText = computed(() => formatRegionText(baseRegion(props.region)))
+
+/**
+ * 拖动 / 改数值时同步输入框，方便看清楚现在是哪一段；正在输入时不打断。
+ * 显示的是「基准坐标」（实际区域 − 偏移），这样再按一次框选不会把偏移叠加第二次。
+ */
 watch(
   () => props.region,
   (r) => {
     if (coordFocused.value) return
-    coordText.value = r ? formatRegionText(r) : ''
+    coordText.value = r ? formatRegionText(baseRegion(r)) : ''
   },
   { immediate: true },
 )
 
-function applyRegion(region, text) {
+/** 把偏移叠到框选结果上，超出屏幕时贴边（整块区域留在屏内） */
+function shiftRegion(region, off) {
+  if (!off.x && !off.y) return { region, clamped: false }
+  const maxX = props.deviceW > 0 ? Math.max(0, props.deviceW - region.w) : Infinity
+  const maxY = props.deviceH > 0 ? Math.max(0, props.deviceH - region.h) : Infinity
+  const x = Math.min(Math.max(0, region.x + off.x), maxX)
+  const y = Math.min(Math.max(0, region.y + off.y), maxY)
+  return { region: { ...region, x, y }, clamped: x !== region.x + off.x || y !== region.y + off.y }
+}
+
+function applyRegion(region, off) {
   // 先用坐标框选也要冻结画面，否则实时画面还在动，选区和看到的画面会对不上
   emit('interact')
-  emit('update:region', region)
-  if (text != null) coordText.value = text
-  else coordText.value = formatRegionText(region)
-  ElMessage.success(`已框选 ${formatRegionText(region)}`)
+  const { region: final, clamped } = shiftRegion(region, off)
+  emit('update:region', final)
+  coordText.value = formatRegionText(baseRegion(final, off))
+  const applied = off.x || off.y ? `（叠加偏移 ${signed(off.x)}, ${signed(off.y)}）` : ''
+  ElMessage.success(`已框选 ${formatRegionText(final)}${applied}${clamped ? '，超出屏幕已贴边' : ''}`)
 }
 
 /** 清空坐标输入 → 清除框选并恢复实时画面（留空回车 / 点「框选」/ 点输入框右侧 × 都走这里） */
@@ -269,6 +326,11 @@ function applyCoord() {
     clearCoord()
     return
   }
+  const off = readOffset()
+  if (!off.ok) {
+    ElMessage.warning(off.error)
+    return
+  }
   const res = parseRegion(text, {
     width: props.deviceW,
     height: props.deviceH,
@@ -278,7 +340,7 @@ function applyCoord() {
     ElMessage.warning(res.error)
     return
   }
-  applyRegion(res.region)
+  applyRegion(res.region, off)
 }
 
 /** 粘贴时先尝试解析：能解析就直接框选，解析不了就让文本正常进输入框再手改 */
@@ -291,8 +353,10 @@ function onPaste(ev) {
     current: props.region,
   })
   if (!res.ok) return
+  const off = readOffset()
+  if (!off.ok) return // 偏移量写错了就不拦粘贴，回车时再提示
   ev.preventDefault()
-  applyRegion(res.region, text.trim())
+  applyRegion(res.region, off)
 }
 
 async function readClipboard() {
