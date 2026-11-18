@@ -3,7 +3,8 @@
 面向 [AutoJs6](https://github.com/SuperMonster003/AutoJs6) 脚本开发的辅助工具：在浏览器里直接看到手机画面，
 拖一下就拿到区域的 `x / y / w / h`，点一下就拿到锚点坐标与精确颜色，并直接生成可粘贴的 AutoJs6 代码。
 
-技术栈：**Vite + Vue 3 + Element Plus**。两条连接引擎互相独立：**ADB 命令**由 Vite 插件形式的服务端（`server/`）调用 `adb`；
+技术栈：**Vite + Vue 3 + Element Plus**（组件与图标按需引入，主包 542KB / gzip 190KB）。
+两条连接引擎互相独立：**ADB 命令**由 Vite 插件形式的服务端（`server/`）调用 `adb`；
 **USB 直连**整个跑在浏览器里（WebUSB + [Tango](https://github.com/yume-chan/ya-webadb)），不依赖任何 Node 后端 ——
 所以 `npm run build` 出来的静态页面放到任意静态空间里，插上手机就能用。
 

@@ -1,513 +1,517 @@
 <template>
-  <div class="app-shell" :class="{ 'rail-collapsed': railCollapsed }">
-    <!-- 顶栏 / 侧栏（宽大于高时自动变成左侧竖栏） -->
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-logo">
-          <el-icon :size="18"><Aim /></el-icon>
-        </div>
-        <div class="brand-text">
-          <div class="brand-title">AutoJs6 开发助手</div>
-          <div class="brand-sub">ADB 实时画面 · 区域坐标 · 锚点取色</div>
-        </div>
-        <el-tooltip :content="railCollapsed ? '展开侧栏' : '收起侧栏'" placement="right">
-          <button class="rail-toggle" @click="toggleRail">
-            <el-icon><component :is="railCollapsed ? 'DArrowRight' : 'DArrowLeft'" /></el-icon>
-          </button>
-        </el-tooltip>
-      </div>
-
-      <div class="topbar-divider" />
-
-      <div class="hb-group">
-        <span class="topbar-label hb-title">数据源</span>
-        <div class="hb-seg">
-          <button :class="{ active: !imageMode }" @click="setSource('device')">
-            <el-icon><Iphone /></el-icon><span class="btn-text">设备</span>
-          </button>
-          <button :class="{ active: imageMode }" @click="setSource('image')">
-            <el-icon><Picture /></el-icon><span class="btn-text">图片</span>
-          </button>
-        </div>
-      </div>
-
-      <div class="topbar-divider" />
-
-      <!-- 数据源：设备 -->
-      <div v-if="!imageMode" class="hb-group">
-        <span class="topbar-label hb-title">设备</span>
-        <div class="hb-row">
-          <el-select
-            v-model="serial"
-            class="device-select"
-            size="default"
-            :loading="loadingDevices"
-            placeholder="选择设备"
-            no-data-text="未检测到设备"
-          >
-            <el-option v-for="d in devices" :key="d.serial" :label="d.label" :value="d.serial">
-              <div class="opt-row">
-                <span class="opt-dot" :class="d.state" />
-                <span class="opt-name">{{ d.model || d.serial }}</span>
-                <span class="opt-meta mono">{{ d.serial }}</span>
-              </div>
-            </el-option>
-            <template #prefix>
-              <el-icon><Iphone /></el-icon>
-            </template>
-          </el-select>
-
-          <div class="hb-btns">
-            <el-button :loading="loadingDevices" circle @click="refreshDevices()">
-              <el-icon v-if="!loadingDevices"><Refresh /></el-icon>
-            </el-button>
-
-            <!-- USB 直连：浏览器要先拿到这台设备的授权（WebUSB 规定必须由点击触发） -->
-            <el-button
-              v-if="usbMode"
-              :loading="usbPicking"
-              :title="usbOk ? '授权另一台 USB 设备' : '选择要连接的 USB 设备（首次需要授权）'"
-              @click="pickUsbDevice"
-            >
-              <el-icon><Connection /></el-icon>
-              <span class="btn-text">&nbsp;USB 设备</span>
-            </el-button>
-
-            <el-popover
-              v-if="wirelessOk"
-              v-model:visible="connectOpen"
-              placement="bottom-start"
-              :width="318"
-              trigger="click"
-              @after-enter="focusConnectInputOnEnter"
-            >
-              <template #reference>
-                <el-button>
-                  <el-icon><Connection /></el-icon>
-                  <span class="btn-text">&nbsp;无线连接</span>
-                </el-button>
-              </template>
-              <div class="popover-body">
-                <div class="popover-title">通过 Wi-Fi 连接 Android 设备</div>
-                <el-input
-                  ref="connectInputRef"
-                  v-model="connectAddr"
-                  size="small"
-                  placeholder="192.168.1.20:5555"
-                  class="mono"
-                  :disabled="connecting"
-                  @keyup.enter="onConnectEnter"
-                />
-                <div class="popover-actions">
-                  <el-button size="small" type="primary" :loading="connecting" @click="doConnect">连接</el-button>
-                  <el-button size="small" :disabled="connecting" @click="connectAddr = ''">清空</el-button>
-                </div>
-
-                <!-- mDNS 自动发现：adb 支持 mdns 时列出同一局域网内开启「无线调试」的设备 -->
-                <div v-if="lanSupported" class="lan-block">
-                  <div class="lan-head">
-                    <span class="lan-title">
-                      <el-icon><Location /></el-icon>
-                      局域网设备
-                      <em v-if="lanServices.length" class="lan-count">{{ lanServices.length }}</em>
-                    </span>
-                    <button
-                      type="button"
-                      class="lan-refresh"
-                      :class="{ spinning: loadingLan }"
-                      :disabled="loadingLan"
-                      title="重新扫描局域网设备"
-                      @click="loadLanDevices({ refresh: true })"
-                    >
-                      <el-icon><Refresh /></el-icon>
-                    </button>
-                  </div>
-                  <ul v-if="lanServices.length" class="lan-list">
-                    <li v-for="s in lanServices" :key="`${s.kind}-${s.deviceKey}`">
-                      <button
-                        type="button"
-                        class="lan-item"
-                        :class="[s.kind, { online: s.online || s.connected }]"
-                        :disabled="connecting"
-                        :title="
-                          s.kind === 'pairing'
-                            ? `输入配对码，与 ${s.address} 完成配对`
-                            : `点击连接 ${s.address}`
-                        "
-                        @click="connectLanDevice(s)"
-                      >
-                        <span class="lan-dot" :class="{ on: s.online || s.connected }" />
-                        <span class="lan-text">
-                          <b>{{ s.model || s.deviceKey || s.name }}</b>
-                          <em class="mono">{{ s.address }}</em>
-                        </span>
-                        <span class="lan-tag" :class="s.kind">
-                          {{
-                            s.kind === 'pairing'
-                              ? '待配对'
-                              : s.online || s.connected
-                                ? '已连接'
-                                : '可连接'
-                          }}
-                        </span>
-                      </button>
-                    </li>
-                  </ul>
-                  <div v-else class="lan-empty">
-                    {{ loadingLan ? '正在扫描局域网…' : '未发现设备，请确认手机已开启「无线调试」且与本机同一 Wi-Fi' }}
-                  </div>
-                </div>
-                <div v-else-if="lanSupported === false" class="lan-unsupported">
-                  {{ lanReason === 'disabled' ? '当前 adb 未启用 mDNS 发现' : '当前 adb 不支持 mDNS 发现' }}<span
-                    v-if="lanTip"
-                    >（{{ lanTip }}）</span
-                  >，可改用 <span class="mono">adb tcpip 5555</span> 方式。
-                </div>
-
-                <div v-if="connectHistory.length" class="history-block">
-                  <div class="history-title">最近连接</div>
-                  <ul class="history-list">
-                    <li v-for="h in connectHistory" :key="h.addr" class="history-item">
-                      <button
-                        type="button"
-                        class="history-main"
-                        :title="`点击直接连接 ${h.addr}`"
-                        @click="connectFromHistory(h)"
-                      >
-                        <span class="mono history-addr">{{ h.addr }}</span>
-                        <span class="history-time">{{ formatConnectTime(h.at) }}</span>
-                      </button>
-                      <button
-                        type="button"
-                        class="history-del"
-                        title="删除这条历史"
-                        @click.stop="removeConnectHistory(h.addr)"
-                      >
-                        <el-icon><Close /></el-icon>
-                      </button>
-                    </li>
-                  </ul>
-                </div>
-                <div class="hint-text">
-                  先在同一局域网下执行 <span class="mono">adb tcpip 5555</span>，或使用 USB 配对后的端口。
-                </div>
-              </div>
-            </el-popover>
+  <!-- 按需引入后，全局中文语言包改由 ConfigProvider 提供（它只渲染插槽，不影响布局） -->
+  <el-config-provider :locale="zhCn">
+    <div class="app-shell" :class="{ 'rail-collapsed': railCollapsed }">
+      <!-- 顶栏 / 侧栏（宽大于高时自动变成左侧竖栏） -->
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-logo">
+            <el-icon :size="18"><Aim /></el-icon>
           </div>
-        </div>
-      </div>
-
-      <!-- 数据源：本地图片 -->
-      <div v-else class="hb-group">
-        <span class="topbar-label hb-title">图片</span>
-        <div class="hb-btns">
-          <el-button :loading="uploading" @click="openImagePicker">
-            <el-icon v-if="!uploading"><Upload /></el-icon>
-            <span class="btn-text">&nbsp;{{ imageInfo ? '换一张' : '选择图片' }}</span>
-          </el-button>
-          <el-tooltip v-if="imageInfo" content="清除当前图片" :placement="tipPlacement">
-            <el-button circle @click="clearImage">
-              <el-icon><Close /></el-icon>
-            </el-button>
+          <div class="brand-text">
+            <div class="brand-title">AutoJs6 开发助手</div>
+            <div class="brand-sub">ADB 实时画面 · 区域坐标 · 锚点取色</div>
+          </div>
+          <el-tooltip :content="railCollapsed ? '展开侧栏' : '收起侧栏'" placement="right">
+            <button class="rail-toggle" @click="toggleRail">
+              <el-icon><component :is="railCollapsed ? 'DArrowRight' : 'DArrowLeft'" /></el-icon>
+            </button>
           </el-tooltip>
         </div>
-        <div v-if="imageInfo" class="img-brief" :title="imageInfo.name">
-          <span class="mono">{{ imageInfo.name }}</span>
-        </div>
-      </div>
 
-      <!-- 画面参数仅对设备实时画面生效，图片模式下整组隐藏 -->
-      <template v-if="!imageMode">
         <div class="topbar-divider" />
 
         <div class="hb-group">
-          <span class="topbar-label hb-title">画面</span>
-          <div class="hb-fields">
-            <div class="hb-field">
-              <label>来源</label>
-              <div class="hb-seg">
-                <button
-                  :class="{ active: !recordMode }"
-                  title="逐帧截图（screencap）：像素无损，取色最准"
-                  @click="setFrameSource('shot')"
-                >
-                  <el-icon><Camera /></el-icon><span class="btn-text">截图</span>
-                </button>
-                <button
-                  :class="{ active: recordMode }"
-                  :disabled="isDemo"
-                  :title="
-                    isDemo
-                      ? '演示模式没有真实设备，无法录屏'
-                      : '屏幕录制（screenrecord）：画面更流畅，码率可调'
-                  "
-                  @click="setFrameSource('record')"
-                >
-                  <el-icon><VideoCamera /></el-icon><span class="btn-text">录屏</span>
-                </button>
-              </div>
-            </div>
-
-            <div class="hb-field">
-              <label>实时</label>
-              <el-switch
-                :model-value="!frozen"
-                inline-prompt
-                active-text="实时"
-                inactive-text="冻结"
-                style="--el-switch-on-color: #0ea5a0"
-                @change="(v) => (v ? resumeLive() : freezeFrame())"
-              />
-            </div>
-
-            <div class="hb-field">
-              <label>{{ recordMode ? '码率' : '帧率' }}</label>
-              <!-- 两个下拉都常驻（v-show），避免 v-if 切换时复用同一个 el-select 实例导致显示值与绑定值错位 -->
-              <el-select v-show="!recordMode" v-model="fps" :key="'fps'" class="fps-select" size="small">
-                <el-option v-for="v in FPS_OPTIONS" :key="v" :label="`${v} fps`" :value="v" />
-              </el-select>
-              <el-select v-show="recordMode" v-model="bitrate" :key="'bitrate'" class="bitrate-select" size="small">
-                <el-option v-for="b in BITRATE_OPTIONS" :key="b" :label="`${b / 1000000} Mbps`" :value="b" />
-              </el-select>
-            </div>
-
-            <div class="hb-field">
-              <label>画质</label>
-              <el-select v-model="scale" class="scale-select" size="small">
-                <el-option label="原画 1:1" :value="1" />
-                <el-option label="高清" :value="2" />
-                <el-option label="标准" :value="3" />
-                <el-option label="流畅" :value="4" />
-              </el-select>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="topbar-spacer" />
-
-      <div class="hb-status">
-        <el-tag size="small" :type="adbOk ? 'success' : 'danger'" effect="light" round class="adb-tag">
-          <span class="tag-text mono">{{ adbOk ? `${engineShort || 'ADB'} 已就绪` : `${engineShort || 'ADB'} 未就绪` }}</span>
-        </el-tag>
-        <el-tooltip :content="engineTip" placement="bottom-end">
-          <el-icon class="help-dot"><InfoFilled /></el-icon>
-        </el-tooltip>
-      </div>
-
-      <button class="settings-btn" @click="settingsOpen = true">
-        <el-icon><Setting /></el-icon>
-        <span class="btn-text">设置</span>
-      </button>
-    </header>
-
-    <input ref="fileInputRef" type="file" accept="image/*" class="hidden-file" @change="onFileChange" />
-
-    <div class="app-body">
-      <!-- 主区 -->
-      <div class="workspace">
-        <div
-          class="stage-panel"
-          :class="{ 'drop-active': dragOver }"
-          @dragover.prevent="onDragOver"
-          @dragleave="onDragLeave"
-          @drop.prevent="onDrop"
-        >
-          <ScreenStage
-            v-model:mode="mode"
-            v-model:pan-mode="panMode"
-            v-model:show-toolbar="showToolbar"
-            :bitmap="displayBitmap"
-            :meta="displayMeta"
-            :region="region"
-            :offsets="mode === 'region' ? offsets : []"
-            :offset-picking="mode === 'region' && offsetPicking"
-            :anchor="mode === 'color' ? anchor : null"
-            :matches="mode === 'color' ? matches : []"
-            :match-total="mode === 'color' ? findResult?.total || 0 : 0"
-            :bbox="mode === 'color' ? bbox : null"
-            :frozen="frozen && !imageMode"
-            :color-format="colorFormat"
-            :auto-resume="autoResume"
-            :live-touch="liveTouch"
-            :empty-title="imageMode ? '还没有载入图片' : '等待画面…'"
-            :empty-desc="
-              imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
-            "
-            @update:region="setRegion"
-            @clear-region="clearRegion"
-            @update:offset-picking="(v) => (offsetPicking = v)"
-            @pick="onPick"
-            @pick-offset="onPickOffset"
-            @interact="freezeFrame"
-            @touch="onLiveTouch"
-            @resume="resumeLive"
-            @request-original="ensureOriginal"
-            @hover="onHover"
-          />
-          <div v-if="dragOver" class="drop-mask">
-            <el-icon :size="30"><PictureFilled /></el-icon>
-            <span>松开鼠标载入图片</span>
+          <span class="topbar-label hb-title">数据源</span>
+          <div class="hb-seg">
+            <button :class="{ active: !imageMode }" @click="setSource('device')">
+              <el-icon><Iphone /></el-icon><span class="btn-text">设备</span>
+            </button>
+            <button :class="{ active: imageMode }" @click="setSource('image')">
+              <el-icon><Picture /></el-icon><span class="btn-text">图片</span>
+            </button>
           </div>
         </div>
 
-        <aside class="side-panel">
-          <RegionPanel
-            v-if="mode === 'region'"
-            :region="region"
-            :offsets="offsets"
-            :picking="offsetPicking"
-            :device-w="deviceW"
-            :device-h="deviceH"
-            :serial="activeSerial"
-            :frame-id="displayMeta?.frameId"
-            :bitmap="displayBitmap"
-            :meta="displayMeta"
-            @update:region="setRegion"
-            @clear-region="clearRegion"
-            @interact="freezeFrame"
-            @resume="resumeLive"
-            @update:offsets="(v) => (offsets = v)"
-            @update:picking="(v) => (offsetPicking = v)"
-          />
-          <ColorPanel
-            v-else
-            :anchor="anchor"
-            :color="searchColor"
-            :threshold="threshold"
-            :restrict="restrict"
-            :has-region="!!region"
-            :result="findResult"
-            :loading="finding"
-            :format="colorFormat"
-            :device-w="deviceW"
-            :device-h="deviceH"
-            @update:color="(v) => (searchColor = v)"
-            @update:threshold="onThreshold"
-            @update:restrict="onRestrict"
-            @update:format="setColorFormat"
-            @find="runFind"
-            @clear="clearAnchorAndResume"
-            @pick="onPick"
-          />
-          <DevicePanel
-            v-if="!imageMode"
-            :serial="serial"
-            :info="info"
-            :anchor="anchor"
-            :record-mode="recordMode"
-            :live-touch="liveTouch"
-            @update:live-touch="setLiveTouch"
-          />
-          <div v-else class="panel-card">
-            <div class="panel-head">
-              <span class="panel-head-icon"><el-icon><Picture /></el-icon></span>
-              <span class="panel-title">图片信息</span>
-              <span class="panel-head-extra">
-                <el-tag v-if="imageInfo" size="small" type="info" effect="plain" round class="mono">
-                  {{ imageInfo.width }} × {{ imageInfo.height }}
-                </el-tag>
-              </span>
-            </div>
-            <template v-if="imageInfo">
-              <div class="field-row">
-                <span class="field-label">文件</span>
-                <span class="field-grow ellipsis" :title="imageInfo.name">{{ imageInfo.name }}</span>
-              </div>
-              <div class="field-row">
-                <span class="field-label">尺寸</span>
-                <b class="mono">{{ imageInfo.width }} × {{ imageInfo.height }}</b>
-                <span class="hint-text">· {{ formatBytes(imageInfo.size) }}</span>
-              </div>
-              <div class="field-row">
-                <span class="field-label">坐标</span>
-                <span class="hint-text">与图片像素 1:1，可直接写进脚本</span>
-              </div>
-              <div class="op-row">
-                <el-button size="small" :loading="uploading" @click="openImagePicker">
-                  <el-icon><Picture /></el-icon>&nbsp;换一张
-                </el-button>
-                <el-tooltip content="保存整张图片（Ctrl / ⌘ + S）" placement="top">
-                  <el-button size="small" @click="saveWholeImage">
-                    <el-icon><Download /></el-icon>&nbsp;保存整图
+        <div class="topbar-divider" />
+
+        <!-- 数据源：设备 -->
+        <div v-if="!imageMode" class="hb-group">
+          <span class="topbar-label hb-title">设备</span>
+          <div class="hb-row">
+            <el-select
+              v-model="serial"
+              class="device-select"
+              size="default"
+              :loading="loadingDevices"
+              placeholder="选择设备"
+              no-data-text="未检测到设备"
+            >
+              <el-option v-for="d in devices" :key="d.serial" :label="d.label" :value="d.serial">
+                <div class="opt-row">
+                  <span class="opt-dot" :class="d.state" />
+                  <span class="opt-name">{{ d.model || d.serial }}</span>
+                  <span class="opt-meta mono">{{ d.serial }}</span>
+                </div>
+              </el-option>
+              <template #prefix>
+                <el-icon><Iphone /></el-icon>
+              </template>
+            </el-select>
+
+            <div class="hb-btns">
+              <el-button :loading="loadingDevices" circle @click="refreshDevices()">
+                <el-icon v-if="!loadingDevices"><Refresh /></el-icon>
+              </el-button>
+
+              <!-- USB 直连：浏览器要先拿到这台设备的授权（WebUSB 规定必须由点击触发） -->
+              <el-button
+                v-if="usbMode"
+                :loading="usbPicking"
+                :title="usbOk ? '授权另一台 USB 设备' : '选择要连接的 USB 设备（首次需要授权）'"
+                @click="pickUsbDevice"
+              >
+                <el-icon><Connection /></el-icon>
+                <span class="btn-text">&nbsp;USB 设备</span>
+              </el-button>
+
+              <el-popover
+                v-if="wirelessOk"
+                v-model:visible="connectOpen"
+                placement="bottom-start"
+                :width="318"
+                trigger="click"
+                @after-enter="focusConnectInputOnEnter"
+              >
+                <template #reference>
+                  <el-button>
+                    <el-icon><Connection /></el-icon>
+                    <span class="btn-text">&nbsp;无线连接</span>
                   </el-button>
-                </el-tooltip>
-                <el-button size="small" @click="setSource('device')">回到设备</el-button>
-              </div>
-            </template>
-            <div v-else class="empty-hint">
-              还没有载入图片<br />点上方「选择图片」，或直接把图片拖到左侧画面
+                </template>
+                <div class="popover-body">
+                  <div class="popover-title">通过 Wi-Fi 连接 Android 设备</div>
+                  <el-input
+                    ref="connectInputRef"
+                    v-model="connectAddr"
+                    size="small"
+                    placeholder="192.168.1.20:5555"
+                    class="mono"
+                    :disabled="connecting"
+                    @keyup.enter="onConnectEnter"
+                  />
+                  <div class="popover-actions">
+                    <el-button size="small" type="primary" :loading="connecting" @click="doConnect">连接</el-button>
+                    <el-button size="small" :disabled="connecting" @click="connectAddr = ''">清空</el-button>
+                  </div>
+
+                  <!-- mDNS 自动发现：adb 支持 mdns 时列出同一局域网内开启「无线调试」的设备 -->
+                  <div v-if="lanSupported" class="lan-block">
+                    <div class="lan-head">
+                      <span class="lan-title">
+                        <el-icon><Location /></el-icon>
+                        局域网设备
+                        <em v-if="lanServices.length" class="lan-count">{{ lanServices.length }}</em>
+                      </span>
+                      <button
+                        type="button"
+                        class="lan-refresh"
+                        :class="{ spinning: loadingLan }"
+                        :disabled="loadingLan"
+                        title="重新扫描局域网设备"
+                        @click="loadLanDevices({ refresh: true })"
+                      >
+                        <el-icon><Refresh /></el-icon>
+                      </button>
+                    </div>
+                    <ul v-if="lanServices.length" class="lan-list">
+                      <li v-for="s in lanServices" :key="`${s.kind}-${s.deviceKey}`">
+                        <button
+                          type="button"
+                          class="lan-item"
+                          :class="[s.kind, { online: s.online || s.connected }]"
+                          :disabled="connecting"
+                          :title="
+                            s.kind === 'pairing'
+                              ? `输入配对码，与 ${s.address} 完成配对`
+                              : `点击连接 ${s.address}`
+                          "
+                          @click="connectLanDevice(s)"
+                        >
+                          <span class="lan-dot" :class="{ on: s.online || s.connected }" />
+                          <span class="lan-text">
+                            <b>{{ s.model || s.deviceKey || s.name }}</b>
+                            <em class="mono">{{ s.address }}</em>
+                          </span>
+                          <span class="lan-tag" :class="s.kind">
+                            {{
+                              s.kind === 'pairing'
+                                ? '待配对'
+                                : s.online || s.connected
+                                  ? '已连接'
+                                  : '可连接'
+                            }}
+                          </span>
+                        </button>
+                      </li>
+                    </ul>
+                    <div v-else class="lan-empty">
+                      {{ loadingLan ? '正在扫描局域网…' : '未发现设备，请确认手机已开启「无线调试」且与本机同一 Wi-Fi' }}
+                    </div>
+                  </div>
+                  <div v-else-if="lanSupported === false" class="lan-unsupported">
+                    {{ lanReason === 'disabled' ? '当前 adb 未启用 mDNS 发现' : '当前 adb 不支持 mDNS 发现' }}<span
+                      v-if="lanTip"
+                      >（{{ lanTip }}）</span
+                    >，可改用 <span class="mono">adb tcpip 5555</span> 方式。
+                  </div>
+
+                  <div v-if="connectHistory.length" class="history-block">
+                    <div class="history-title">最近连接</div>
+                    <ul class="history-list">
+                      <li v-for="h in connectHistory" :key="h.addr" class="history-item">
+                        <button
+                          type="button"
+                          class="history-main"
+                          :title="`点击直接连接 ${h.addr}`"
+                          @click="connectFromHistory(h)"
+                        >
+                          <span class="mono history-addr">{{ h.addr }}</span>
+                          <span class="history-time">{{ formatConnectTime(h.at) }}</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="history-del"
+                          title="删除这条历史"
+                          @click.stop="removeConnectHistory(h.addr)"
+                        >
+                          <el-icon><Close /></el-icon>
+                        </button>
+                      </li>
+                    </ul>
+                  </div>
+                  <div class="hint-text">
+                    先在同一局域网下执行 <span class="mono">adb tcpip 5555</span>，或使用 USB 配对后的端口。
+                  </div>
+                </div>
+              </el-popover>
             </div>
           </div>
-        </aside>
+        </div>
+
+        <!-- 数据源：本地图片 -->
+        <div v-else class="hb-group">
+          <span class="topbar-label hb-title">图片</span>
+          <div class="hb-btns">
+            <el-button :loading="uploading" @click="openImagePicker">
+              <el-icon v-if="!uploading"><Upload /></el-icon>
+              <span class="btn-text">&nbsp;{{ imageInfo ? '换一张' : '选择图片' }}</span>
+            </el-button>
+            <el-tooltip v-if="imageInfo" content="清除当前图片" :placement="tipPlacement">
+              <el-button circle @click="clearImage">
+                <el-icon><Close /></el-icon>
+              </el-button>
+            </el-tooltip>
+          </div>
+          <div v-if="imageInfo" class="img-brief" :title="imageInfo.name">
+            <span class="mono">{{ imageInfo.name }}</span>
+          </div>
+        </div>
+
+        <!-- 画面参数仅对设备实时画面生效，图片模式下整组隐藏 -->
+        <template v-if="!imageMode">
+          <div class="topbar-divider" />
+
+          <div class="hb-group">
+            <span class="topbar-label hb-title">画面</span>
+            <div class="hb-fields">
+              <div class="hb-field">
+                <label>来源</label>
+                <div class="hb-seg">
+                  <button
+                    :class="{ active: !recordMode }"
+                    title="逐帧截图（screencap）：像素无损，取色最准"
+                    @click="setFrameSource('shot')"
+                  >
+                    <el-icon><Camera /></el-icon><span class="btn-text">截图</span>
+                  </button>
+                  <button
+                    :class="{ active: recordMode }"
+                    :disabled="isDemo"
+                    :title="
+                      isDemo
+                        ? '演示模式没有真实设备，无法录屏'
+                        : '屏幕录制（screenrecord）：画面更流畅，码率可调'
+                    "
+                    @click="setFrameSource('record')"
+                  >
+                    <el-icon><VideoCamera /></el-icon><span class="btn-text">录屏</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="hb-field">
+                <label>实时</label>
+                <el-switch
+                  :model-value="!frozen"
+                  inline-prompt
+                  active-text="实时"
+                  inactive-text="冻结"
+                  style="--el-switch-on-color: #0ea5a0"
+                  @change="(v) => (v ? resumeLive() : freezeFrame())"
+                />
+              </div>
+
+              <div class="hb-field">
+                <label>{{ recordMode ? '码率' : '帧率' }}</label>
+                <!-- 两个下拉都常驻（v-show），避免 v-if 切换时复用同一个 el-select 实例导致显示值与绑定值错位 -->
+                <el-select v-show="!recordMode" v-model="fps" :key="'fps'" class="fps-select" size="small">
+                  <el-option v-for="v in FPS_OPTIONS" :key="v" :label="`${v} fps`" :value="v" />
+                </el-select>
+                <el-select v-show="recordMode" v-model="bitrate" :key="'bitrate'" class="bitrate-select" size="small">
+                  <el-option v-for="b in BITRATE_OPTIONS" :key="b" :label="`${b / 1000000} Mbps`" :value="b" />
+                </el-select>
+              </div>
+
+              <div class="hb-field">
+                <label>画质</label>
+                <el-select v-model="scale" class="scale-select" size="small">
+                  <el-option label="原画 1:1" :value="1" />
+                  <el-option label="高清" :value="2" />
+                  <el-option label="标准" :value="3" />
+                  <el-option label="流畅" :value="4" />
+                </el-select>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <div class="topbar-spacer" />
+
+        <div class="hb-status">
+          <el-tag size="small" :type="adbOk ? 'success' : 'danger'" effect="light" round class="adb-tag">
+            <span class="tag-text mono">{{ adbOk ? `${engineShort || 'ADB'} 已就绪` : `${engineShort || 'ADB'} 未就绪` }}</span>
+          </el-tag>
+          <el-tooltip :content="engineTip" placement="bottom-end">
+            <el-icon class="help-dot"><InfoFilled /></el-icon>
+          </el-tooltip>
+        </div>
+
+        <button class="settings-btn" @click="settingsOpen = true">
+          <el-icon><Setting /></el-icon>
+          <span class="btn-text">设置</span>
+        </button>
+      </header>
+
+      <input ref="fileInputRef" type="file" accept="image/*" class="hidden-file" @change="onFileChange" />
+
+      <div class="app-body">
+        <!-- 主区 -->
+        <div class="workspace">
+          <div
+            class="stage-panel"
+            :class="{ 'drop-active': dragOver }"
+            @dragover.prevent="onDragOver"
+            @dragleave="onDragLeave"
+            @drop.prevent="onDrop"
+          >
+            <ScreenStage
+              v-model:mode="mode"
+              v-model:pan-mode="panMode"
+              v-model:show-toolbar="showToolbar"
+              :bitmap="displayBitmap"
+              :meta="displayMeta"
+              :region="region"
+              :offsets="mode === 'region' ? offsets : []"
+              :offset-picking="mode === 'region' && offsetPicking"
+              :anchor="mode === 'color' ? anchor : null"
+              :matches="mode === 'color' ? matches : []"
+              :match-total="mode === 'color' ? findResult?.total || 0 : 0"
+              :bbox="mode === 'color' ? bbox : null"
+              :frozen="frozen && !imageMode"
+              :color-format="colorFormat"
+              :auto-resume="autoResume"
+              :live-touch="liveTouch"
+              :empty-title="imageMode ? '还没有载入图片' : '等待画面…'"
+              :empty-desc="
+                imageMode ? '点「选择图片」，或把图片直接拖到这个区域' : '正在连接设备并拉取屏幕，稍候片刻'
+              "
+              @update:region="setRegion"
+              @clear-region="clearRegion"
+              @update:offset-picking="(v) => (offsetPicking = v)"
+              @pick="onPick"
+              @pick-offset="onPickOffset"
+              @interact="freezeFrame"
+              @touch="onLiveTouch"
+              @resume="resumeLive"
+              @request-original="ensureOriginal"
+              @hover="onHover"
+            />
+            <div v-if="dragOver" class="drop-mask">
+              <el-icon :size="30"><PictureFilled /></el-icon>
+              <span>松开鼠标载入图片</span>
+            </div>
+          </div>
+
+          <aside class="side-panel">
+            <RegionPanel
+              v-if="mode === 'region'"
+              :region="region"
+              :offsets="offsets"
+              :picking="offsetPicking"
+              :device-w="deviceW"
+              :device-h="deviceH"
+              :serial="activeSerial"
+              :frame-id="displayMeta?.frameId"
+              :bitmap="displayBitmap"
+              :meta="displayMeta"
+              @update:region="setRegion"
+              @clear-region="clearRegion"
+              @interact="freezeFrame"
+              @resume="resumeLive"
+              @update:offsets="(v) => (offsets = v)"
+              @update:picking="(v) => (offsetPicking = v)"
+            />
+            <ColorPanel
+              v-else
+              :anchor="anchor"
+              :color="searchColor"
+              :threshold="threshold"
+              :restrict="restrict"
+              :has-region="!!region"
+              :result="findResult"
+              :loading="finding"
+              :format="colorFormat"
+              :device-w="deviceW"
+              :device-h="deviceH"
+              @update:color="(v) => (searchColor = v)"
+              @update:threshold="onThreshold"
+              @update:restrict="onRestrict"
+              @update:format="setColorFormat"
+              @find="runFind"
+              @clear="clearAnchorAndResume"
+              @pick="onPick"
+            />
+            <DevicePanel
+              v-if="!imageMode"
+              :serial="serial"
+              :info="info"
+              :anchor="anchor"
+              :record-mode="recordMode"
+              :live-touch="liveTouch"
+              @update:live-touch="setLiveTouch"
+            />
+            <div v-else class="panel-card">
+              <div class="panel-head">
+                <span class="panel-head-icon"><el-icon><Picture /></el-icon></span>
+                <span class="panel-title">图片信息</span>
+                <span class="panel-head-extra">
+                  <el-tag v-if="imageInfo" size="small" type="info" effect="plain" round class="mono">
+                    {{ imageInfo.width }} × {{ imageInfo.height }}
+                  </el-tag>
+                </span>
+              </div>
+              <template v-if="imageInfo">
+                <div class="field-row">
+                  <span class="field-label">文件</span>
+                  <span class="field-grow ellipsis" :title="imageInfo.name">{{ imageInfo.name }}</span>
+                </div>
+                <div class="field-row">
+                  <span class="field-label">尺寸</span>
+                  <b class="mono">{{ imageInfo.width }} × {{ imageInfo.height }}</b>
+                  <span class="hint-text">· {{ formatBytes(imageInfo.size) }}</span>
+                </div>
+                <div class="field-row">
+                  <span class="field-label">坐标</span>
+                  <span class="hint-text">与图片像素 1:1，可直接写进脚本</span>
+                </div>
+                <div class="op-row">
+                  <el-button size="small" :loading="uploading" @click="openImagePicker">
+                    <el-icon><Picture /></el-icon>&nbsp;换一张
+                  </el-button>
+                  <el-tooltip content="保存整张图片（Ctrl / ⌘ + S）" placement="top">
+                    <el-button size="small" @click="saveWholeImage">
+                      <el-icon><Download /></el-icon>&nbsp;保存整图
+                    </el-button>
+                  </el-tooltip>
+                  <el-button size="small" @click="setSource('device')">回到设备</el-button>
+                </div>
+              </template>
+              <div v-else class="empty-hint">
+                还没有载入图片<br />点上方「选择图片」，或直接把图片拖到左侧画面
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <!-- 状态栏 -->
+        <footer class="statusbar">
+          <span class="status-main">
+            <span class="status-dot" :class="statusDotClass" />
+            <b>{{ statusText }}</b>
+            <button
+              v-if="frozen && !imageMode"
+              class="status-action"
+              :class="{ danger: frozenReason === 'lost' }"
+              @click="onFreezeAction"
+            >
+              <el-icon>
+                <component :is="frozenReason === 'lost' ? 'RefreshRight' : 'VideoPlay'" />
+              </el-icon>
+              {{ frozenReason === 'lost' ? '重连设备' : '恢复实时' }}
+            </button>
+          </span>
+          <span v-if="env?.version">{{ env.version }}</span>
+          <span v-if="!imageMode && serial">serial <b class="mono">{{ serial }}</b></span>
+          <span v-if="imageMode && imageInfo">图片 <b class="mono">{{ imageInfo.name }}</b></span>
+          <span v-if="displayMeta">
+            画面 <b class="mono">{{ displayMeta.deviceWidth }} × {{ displayMeta.deviceHeight }}</b>
+            <template v-if="!imageMode"> · 传输 <b class="mono">{{ displayMeta.width }} × {{ displayMeta.height }}</b></template>
+          </span>
+          <span v-if="displayMeta && !imageMode">
+            实际 <b class="mono">{{ displayMeta.fps || 0 }} fps</b>
+            <template v-if="displayMeta.format === 'h264'">
+              · 码率 <b class="mono">{{ Math.round((displayMeta.bitrate || 0) / 1000000) }} Mbps</b>
+            </template>
+            <template v-else>
+              · 单帧 <b class="mono">{{ displayMeta.cost || 0 }}ms</b>
+            </template>
+          </span>
+          <span v-if="hoverText" class="mono">光标 {{ hoverText }}</span>
+          <span v-if="lastError" class="err-text">{{ lastError }}</span>
+          <span style="margin-left: auto" v-if="region" class="mono">
+            区域 [{{ region.x }}, {{ region.y }}, {{ region.w }}, {{ region.h }}]
+            <template v-if="offsetPicking"> · 取点中…</template>
+            <template v-else-if="offsets.length"> · 偏移 {{ offsets.length }} 个</template>
+          </span>
+        </footer>
       </div>
 
-      <!-- 状态栏 -->
-      <footer class="statusbar">
-        <span class="status-main">
-          <span class="status-dot" :class="statusDotClass" />
-          <b>{{ statusText }}</b>
-          <button
-            v-if="frozen && !imageMode"
-            class="status-action"
-            :class="{ danger: frozenReason === 'lost' }"
-            @click="onFreezeAction"
-          >
-            <el-icon>
-              <component :is="frozenReason === 'lost' ? 'RefreshRight' : 'VideoPlay'" />
-            </el-icon>
-            {{ frozenReason === 'lost' ? '重连设备' : '恢复实时' }}
-          </button>
-        </span>
-        <span v-if="env?.version">{{ env.version }}</span>
-        <span v-if="!imageMode && serial">serial <b class="mono">{{ serial }}</b></span>
-        <span v-if="imageMode && imageInfo">图片 <b class="mono">{{ imageInfo.name }}</b></span>
-        <span v-if="displayMeta">
-          画面 <b class="mono">{{ displayMeta.deviceWidth }} × {{ displayMeta.deviceHeight }}</b>
-          <template v-if="!imageMode"> · 传输 <b class="mono">{{ displayMeta.width }} × {{ displayMeta.height }}</b></template>
-        </span>
-        <span v-if="displayMeta && !imageMode">
-          实际 <b class="mono">{{ displayMeta.fps || 0 }} fps</b>
-          <template v-if="displayMeta.format === 'h264'">
-            · 码率 <b class="mono">{{ Math.round((displayMeta.bitrate || 0) / 1000000) }} Mbps</b>
-          </template>
-          <template v-else>
-            · 单帧 <b class="mono">{{ displayMeta.cost || 0 }}ms</b>
-          </template>
-        </span>
-        <span v-if="hoverText" class="mono">光标 {{ hoverText }}</span>
-        <span v-if="lastError" class="err-text">{{ lastError }}</span>
-        <span style="margin-left: auto" v-if="region" class="mono">
-          区域 [{{ region.x }}, {{ region.y }}, {{ region.w }}, {{ region.h }}]
-          <template v-if="offsetPicking"> · 取点中…</template>
-          <template v-else-if="offsets.length"> · 偏移 {{ offsets.length }} 个</template>
-        </span>
-      </footer>
+      <SettingsDialog
+        v-model="settingsOpen"
+        :toolbar="showToolbar"
+        :color-format="colorFormat"
+        :coord-format="coordFormat"
+        :coord-template="coordTemplate"
+        :auto-resume="autoResume"
+        :env="env"
+        :engine="env?.engine || 'adb'"
+        :engines="env?.engines || []"
+        @update:toolbar="setToolbarDefault"
+        @update:color-format="setColorFormat"
+        @update:coord-format="setCoordFormat"
+        @update:coord-template="setCoordTemplate"
+        @update:auto-resume="setAutoResume"
+        @update:engine="switchEngine"
+        />
     </div>
-
-    <SettingsDialog
-      v-model="settingsOpen"
-      :toolbar="showToolbar"
-      :color-format="colorFormat"
-      :coord-format="coordFormat"
-      :coord-template="coordTemplate"
-      :auto-resume="autoResume"
-      :env="env"
-      :engine="env?.engine || 'adb'"
-      :engines="env?.engines || []"
-      @update:toolbar="setToolbarDefault"
-      @update:color-format="setColorFormat"
-      @update:coord-format="setCoordFormat"
-      @update:coord-template="setCoordTemplate"
-      @update:auto-resume="setAutoResume"
-      @update:engine="switchEngine"
-    />
-  </div>
+  </el-config-provider>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import ScreenStage from './components/ScreenStage.vue'
 import RegionPanel from './components/RegionPanel.vue'
 import ColorPanel from './components/ColorPanel.vue'

@@ -1,5 +1,7 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { adbHelperPlugin } from './server/index.js'
 import { indexEntryPlugin, TEMPLATE } from './build/index-entry.js'
 
@@ -12,7 +14,21 @@ export default defineConfig(({ command }) => ({
    * 开发服务器仍用 '/'：Vite 的 HMR / 中间件都按根路径组织，改相对路径只会自找麻烦。
    */
   base: command === 'build' ? './' : '/',
-  plugins: [vue(), adbHelperPlugin(), indexEntryPlugin()],
+  plugins: [
+    vue(),
+    /**
+     * Element Plus 按需引入：模板里写 <el-button> 就只打包 button 的 JS + CSS。
+     * dirs 置空是有意的 —— 本项目的组件都是在父组件里显式 import 的，
+     * 不需要再按目录自动注册，免得同一个组件被注册两次。
+     */
+    Components({
+      dts: false,
+      dirs: [],
+      resolvers: [ElementPlusResolver()],
+    }),
+    adbHelperPlugin(),
+    indexEntryPlugin(),
+  ],
   server: {
     host: '127.0.0.1',
     port: 5174,
@@ -28,7 +44,7 @@ export default defineConfig(({ command }) => ({
     // USB 直连这条链路本身就跑在 WebUSB / WebCodecs 上，最低已经是 Chrome 89+，
     // 不必为更老的语法环境降级，产物能小一圈
     target: 'es2020',
-    // 主包主要是 Element Plus 全量组件（gzip 后 ~430KB），本地工具不用卡这个警告
-    chunkSizeWarningLimit: 1500,
+    // 按需引入后主包应该在 400KB 上下，留一点余量，超过就说明又被打回整包了
+    chunkSizeWarningLimit: 700,
   },
 }))
