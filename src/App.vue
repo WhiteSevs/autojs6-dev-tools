@@ -65,7 +65,7 @@
             <el-popover
               v-model:visible="connectOpen"
               placement="bottom-start"
-              :width="286"
+              :width="318"
               trigger="click"
               @after-enter="focusConnectInputOnEnter"
             >
@@ -86,6 +86,72 @@
                   :disabled="connecting"
                   @keyup.enter="onConnectEnter"
                 />
+                <div class="popover-actions">
+                  <el-button size="small" type="primary" :loading="connecting" @click="doConnect">连接</el-button>
+                  <el-button size="small" :disabled="connecting" @click="connectAddr = ''">清空</el-button>
+                </div>
+
+                <!-- mDNS 自动发现：adb 支持 mdns 时列出同一局域网内开启「无线调试」的设备 -->
+                <div v-if="lanSupported" class="lan-block">
+                  <div class="lan-head">
+                    <span class="lan-title">
+                      <el-icon><Location /></el-icon>
+                      局域网设备
+                      <em v-if="lanServices.length" class="lan-count">{{ lanServices.length }}</em>
+                    </span>
+                    <button
+                      type="button"
+                      class="lan-refresh"
+                      :class="{ spinning: loadingLan }"
+                      :disabled="loadingLan"
+                      title="重新扫描局域网设备"
+                      @click="loadLanDevices({ refresh: true })"
+                    >
+                      <el-icon><Refresh /></el-icon>
+                    </button>
+                  </div>
+                  <ul v-if="lanServices.length" class="lan-list">
+                    <li v-for="s in lanServices" :key="`${s.kind}-${s.deviceKey}`">
+                      <button
+                        type="button"
+                        class="lan-item"
+                        :class="[s.kind, { online: s.online || s.connected }]"
+                        :disabled="connecting"
+                        :title="
+                          s.kind === 'pairing'
+                            ? `输入配对码，与 ${s.address} 完成配对`
+                            : `点击连接 ${s.address}`
+                        "
+                        @click="connectLanDevice(s)"
+                      >
+                        <span class="lan-dot" :class="{ on: s.online || s.connected }" />
+                        <span class="lan-text">
+                          <b>{{ s.model || s.deviceKey || s.name }}</b>
+                          <em class="mono">{{ s.address }}</em>
+                        </span>
+                        <span class="lan-tag" :class="s.kind">
+                          {{
+                            s.kind === 'pairing'
+                              ? '待配对'
+                              : s.online || s.connected
+                                ? '已连接'
+                                : '可连接'
+                          }}
+                        </span>
+                      </button>
+                    </li>
+                  </ul>
+                  <div v-else class="lan-empty">
+                    {{ loadingLan ? '正在扫描局域网…' : '未发现设备，请确认手机已开启「无线调试」且与本机同一 Wi-Fi' }}
+                  </div>
+                </div>
+                <div v-else-if="lanSupported === false" class="lan-unsupported">
+                  {{ lanReason === 'disabled' ? '当前 adb 未启用 mDNS 发现' : '当前 adb 不支持 mDNS 发现' }}<span
+                    v-if="lanTip"
+                    >（{{ lanTip }}）</span
+                  >，可改用 <span class="mono">adb tcpip 5555</span> 方式。
+                </div>
+
                 <div v-if="connectHistory.length" class="history-block">
                   <div class="history-title">最近连接</div>
                   <ul class="history-list">
@@ -109,10 +175,6 @@
                       </button>
                     </li>
                   </ul>
-                </div>
-                <div class="popover-actions">
-                  <el-button size="small" type="primary" :loading="connecting" @click="doConnect">连接</el-button>
-                  <el-button size="small" :disabled="connecting" @click="connectAddr = ''">清空</el-button>
                 </div>
                 <div class="hint-text">
                   先在同一局域网下执行 <span class="mono">adb tcpip 5555</span>，或使用 USB 配对后的端口。
@@ -430,7 +492,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ScreenStage from './components/ScreenStage.vue'
 import RegionPanel from './components/RegionPanel.vue'
 import ColorPanel from './components/ColorPanel.vue'
@@ -479,6 +541,36 @@ const connectAddr = ref('')
 const connectOpen = ref(false)
 /** 弹窗里的输入框实例，展开时用它自动聚焦 */
 const connectInputRef = ref(null)
+
+/* -------------------- mDNS 局域网设备发现（Android 11+ 无线调试） -------------------- */
+/** 聚合后的局域网设备：[{ kind, name, deviceKey, host, address, addresses, connected, model }] */
+const lanServices = ref([])
+/** null = 尚未探测；false = 当前 adb 不支持 mdns（老版本 / 未编译 mdns），此时不展示列表 */
+const lanSupported = ref(null)
+const lanMessage = ref('')
+/** unsupported = adb 没编 mdns；disabled = 编了但被关掉（部分 Windows 版本） */
+const lanReason = ref('')
+const loadingLan = ref(false)
+const lanTip = computed(() => lanMessage.value || '需 platform-tools 30 及以上')
+
+async function loadLanDevices({ refresh = false } = {}) {
+  if (loadingLan.value) return
+  loadingLan.value = true
+  try {
+    const res = await api.mdns(refresh)
+    lanSupported.value = !!res.supported
+    lanReason.value = res.reason || ''
+    lanMessage.value = res.error || res.message || ''
+    lanServices.value = res.services || []
+  } catch (err) {
+    // 扫描失败不弹窗打断操作：把区块收起来，用户仍可手输地址连接
+    lanSupported.value = null
+    lanMessage.value = err.message
+    lanServices.value = []
+  } finally {
+    loadingLan.value = false
+  }
+}
 
 /* -------------------- 无线连接历史（localStorage 持久化） -------------------- */
 const CONNECT_HISTORY_KEY = 'autojs6.connectHistory.v1'
@@ -920,21 +1012,7 @@ async function doConnect() {
       ElMessage.error(r.message || '连接失败，请检查地址与网络')
       return
     }
-    // 连上后立刻收起弹窗，别挡画面；清空输入框，下次点开是干净的
-    connectOpen.value = false
-    connectAddr.value = ''
-    rememberConnect(addr)
-    const prev = serial.value
-    // 刷新列表并直接切到刚连上的设备（serial 变化会触发投屏重建）
-    await refreshDevices(addr)
-    const picked = devices.value.find((d) => d.serial === serial.value)
-    if (picked && picked.serial === prev && !imageMode.value && (streamLost.value || !ready.value)) {
-      // 选中的本来就是这台：watch 不会触发，画面没就绪就手动重建一次
-      frozen.value = false
-      frozenReason.value = ''
-      stream.connect(streamOptions())
-    }
-    ElMessage.success(picked && picked.ready ? `已连接并切换到 ${picked.model || picked.serial}` : r.message || '连接成功')
+    await finishConnect(addr, r.message)
   } catch (err) {
     ElMessage.error(err.message)
   } finally {
@@ -943,6 +1021,112 @@ async function doConnect() {
     nextTick(() => {
       if (connectOpen.value) focusConnectInput()
     })
+  }
+}
+
+/**
+ * 连上之后的收尾：收起弹窗、记历史、刷新设备列表并切到刚连上的那台。
+ * mDNS 发现（可能同时有多个旧端口）与手输地址都走这里。
+ */
+async function finishConnect(addr, fallbackMessage = '') {
+  connectOpen.value = false
+  connectAddr.value = ''
+  rememberConnect(addr)
+  const prev = serial.value
+  await refreshDevices(addr)
+  const picked = devices.value.find((d) => d.serial === serial.value)
+  if (picked && picked.serial === prev && !imageMode.value && (streamLost.value || !ready.value)) {
+    // 选中的本来就是这台：watch 不会触发，画面没就绪就手动重建一次
+    frozen.value = false
+    frozenReason.value = ''
+    stream.connect(streamOptions())
+  }
+  ElMessage.success(picked && picked.ready ? `已连接并切换到 ${picked.model || picked.serial}` : fallbackMessage || '连接成功')
+}
+
+/** 依次尝试一组候选地址（同一设备在 mDNS 里常留有多条旧端口记录，前几条可能已失效） */
+async function connectAnyAddress(addresses) {
+  let last = ''
+  for (const addr of addresses) {
+    try {
+      const r = await api.connect(addr)
+      if (r.ok) return { ok: true, addr, message: r.message }
+      last = r.message || last
+    } catch (err) {
+      last = err.message
+    }
+  }
+  return { ok: false, message: last }
+}
+
+/** 点局域网设备：已在线直接切过去；connect 服务发起连接；pairing 服务先要配对码 */
+async function connectLanDevice(item) {
+  if (connecting.value) return
+  if (item.kind === 'pairing') return pairLanDevice(item)
+  if (item.online && item.serial) {
+    serial.value = item.serial
+    connectOpen.value = false
+    ElMessage.success(`已切换到 ${item.model || item.serial}`)
+    return
+  }
+  connecting.value = true
+  try {
+    const r = await connectAnyAddress(item.addresses || [item.address])
+    if (!r.ok) {
+      ElMessage.error(r.message || '连接失败，请确认该设备已与电脑配对过')
+      return
+    }
+    await finishConnect(r.addr)
+  } finally {
+    connecting.value = false
+  }
+}
+
+/** 配对流程：配对码在手机的「使用配对码配对设备」弹窗里；配对成功后端口会变，重扫一次再连 */
+async function pairLanDevice(item) {
+  let code = ''
+  try {
+    const res = await ElMessageBox.prompt(
+      `请输入手机「使用配对码配对设备」里显示的 6 位配对码（${item.address}）`,
+      '无线调试配对',
+      {
+        confirmButtonText: '配对',
+        cancelButtonText: '取消',
+        inputPlaceholder: '6 位数字',
+        inputPattern: /^\d{6}$/,
+        inputErrorMessage: '配对码应为 6 位数字',
+        closeOnClickModal: false,
+      },
+    )
+    code = String(res.value || '').trim()
+  } catch {
+    return
+  }
+  connecting.value = true
+  try {
+    const r = await api.pair(item.address, code)
+    if (!r.ok) {
+      ElMessage.error(r.message || '配对失败，配对码可能已过期')
+      return
+    }
+    const res = await api.mdns(true)
+    lanSupported.value = !!res.supported
+    lanServices.value = res.services || []
+    const target =
+      lanServices.value.find(
+        (s) => s.kind === 'connect' && (s.deviceKey === item.deviceKey || s.host === item.host),
+      ) || lanServices.value.find((s) => s.kind === 'connect' && s.host === item.host)
+    if (!target) {
+      ElMessage.success('配对成功，稍等片刻再点一次列表里的设备即可连接')
+      return
+    }
+    const c = await connectAnyAddress(target.addresses || [target.address])
+    if (c.ok) await finishConnect(c.addr, '配对成功并已连接')
+    else ElMessage.warning(`配对成功，但自动连接失败：${c.message}`)
+  } catch (err) {
+    ElMessage.error(err.message)
+  } finally {
+    connecting.value = false
   }
 }
 
@@ -1562,10 +1746,27 @@ watch(
   { deep: true },
 )
 
-/* 无线连接弹窗展开 → 输入框自动聚焦，直接敲地址回车即可 */
+/* 无线连接弹窗展开 → 输入框自动聚焦，直接敲地址回车即可；同时扫一次 mDNS 局域网设备并定时刷新 */
+let lanTimer = null
+function stopLanPoll() {
+  if (lanTimer) {
+    clearInterval(lanTimer)
+    lanTimer = null
+  }
+}
+
 watch(connectOpen, (open) => {
-  if (!open) return
+  if (!open) {
+    stopLanPoll()
+    return
+  }
   nextTick(() => requestAnimationFrame(() => focusConnectInput()))
+  loadLanDevices()
+  stopLanPoll()
+  // 手机开启 / 关闭无线调试后端口会变，弹窗开着就每 10s 重扫，连上后弹窗收起即停
+  lanTimer = setInterval(() => {
+    if (!connecting.value) loadLanDevices({ refresh: true })
+  }, 10000)
 })
 
 watch(serial, async (val) => {
@@ -1660,6 +1861,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  stopLanPoll()
   landscapeMql?.removeEventListener('change', syncLandscape)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('keyup', onGlobalKeyup)
@@ -1729,6 +1931,182 @@ onBeforeUnmount(() => {
 
 .popover-actions .el-button {
   margin-left: 0;
+}
+
+/* mDNS 自动发现的局域网设备：点一下即连（待配对的会先要配对码） */
+.lan-block {
+  border: 1px dashed #dbe3ec;
+  border-radius: 8px;
+  padding: 6px 7px;
+  background: #fbfdff;
+}
+
+.lan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.lan-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.lan-count {
+  font-style: normal;
+  font-size: 10px;
+  color: #0b8480;
+  background: #e7f6f5;
+  border-radius: 8px;
+  padding: 0 5px;
+  line-height: 15px;
+}
+
+.lan-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #9aa8bb;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.lan-refresh:hover {
+  color: #0ea5a0;
+  background: #eef8f8;
+}
+
+.lan-refresh.spinning {
+  color: #0ea5a0;
+  animation: lan-spin 0.9s linear infinite;
+}
+
+@keyframes lan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.lan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.lan-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.lan-item:hover:not(:disabled) {
+  background: #eef8f8;
+}
+
+.lan-item:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.lan-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #cbd5e1;
+}
+
+.lan-dot.on {
+  background: #12a594;
+  box-shadow: 0 0 0 2px #d6f2ef;
+}
+
+.lan-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.lan-text b {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lan-text em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lan-tag {
+  flex: none;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.lan-tag.connect {
+  color: #1f6feb;
+  background: #eaf1fd;
+}
+
+.lan-tag.pairing {
+  color: #b45309;
+  background: #fdf1e0;
+}
+
+.lan-item.online .lan-tag.connect {
+  color: #0b8480;
+  background: #e7f6f5;
+}
+
+.lan-empty,
+.lan-unsupported {
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: #94a3b8;
+  padding: 2px 2px 1px;
+}
+
+.lan-unsupported .mono {
+  color: #64748b;
 }
 
 /* 最近连接：按时间降序，点一下直接连，右侧叉号删掉这条 */

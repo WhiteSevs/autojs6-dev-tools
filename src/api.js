@@ -38,6 +38,10 @@ async function request(path, options = {}) {
 export const api = {
   env: () => request('/api/env'),
   devices: () => request('/api/devices'),
+  /** mDNS 局域网设备发现（Android 11+ 无线调试）；refresh=true 时跳过服务端 60s 探测缓存 */
+  mdns: (refresh = false) => request(`/api/mdns${refresh ? '?refresh=1' : ''}`),
+  /** 无线调试配对：code 为手机屏幕上的 6 位配对码 */
+  pair: (address, code) => request('/api/pair', { method: 'POST', body: JSON.stringify({ address, code }) }),
   connect: (address) => request('/api/connect', { method: 'POST', body: JSON.stringify({ address }) }),
   disconnect: (address) => request('/api/disconnect', { method: 'POST', body: JSON.stringify({ address }) }),
   info: (serial) => request(`/api/info?serial=${encodeURIComponent(serial)}`),

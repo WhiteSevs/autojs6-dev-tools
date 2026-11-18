@@ -8,6 +8,11 @@
 ## 功能
 
 - **设备连接**：自动列出 `adb devices` 中的设备，支持 USB 与无线（`adb connect ip:port`）；点「无线连接」后输入框自动聚焦，回车即连接，成功后弹窗自动收起并切到该设备；连接的地址会存进「最近连接」（本地持久化，按时间倒序，可单条删除、点一下直接连）。
+- **局域网设备自动发现（mDNS）**：adb 支持 `mdns` 时（platform-tools 30+，`adb mdns check` 能返回 daemon 版本），
+  「无线连接」弹窗会用 `adb mdns services` 扫出同一局域网里开了「无线调试」的设备并直接列出（弹窗打开即扫，之后每 10 秒刷新一次），
+  点一下就连：已在线（`_adb-tls-connect`）直接切到该设备，尚未配对（`_adb-tls-pairing`）会先弹框要 6 位配对码、
+  配对成功后自动重扫并连上新端口。同一台设备常有多个旧端口记录，连接时会依次尝试直到成功。
+  当前 adb 没编 mdns（老版本 / `adb mdns check` 报 unsupported）时不显示列表，退回手输地址 + `adb tcpip 5555` 的老路子。
 - **两种数据源**：可以取真机实时画面，也可以**上传本地图片**（或直接把图片拖到画面里）做区域坐标与锚点取色；
   图片会被归一化成 PNG 交给同一套取色 / 找色 / 裁剪管线，所以坐标与颜色跟真机完全一致，与设备无关时也能用。
 - **实时投屏**：服务端 `adb exec-out screencap -p` 抓帧 → sharp 缩放后以 **PNG 无损**推流 → WebSocket 推送，支持刷新率与清晰度调节，
@@ -195,6 +200,8 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 | --- | --- | --- |
 | GET | `/api/env` | adb 版本与状态 |
 | GET | `/api/devices` | 设备列表（含分辨率） |
+| GET | `/api/mdns?refresh=` | 局域网设备发现：返回 `{ supported, services[] }`；`supported=false` 表示当前 adb 没编 mdns 支持 |
+| POST | `/api/pair` | 无线调试配对 `{ address, code }`（`code` 为手机屏幕上的 6 位配对码） |
 | POST | `/api/connect` | 无线连接 `{ address }` |
 | GET | `/api/info?serial=` | 分辨率 / 密度 / 型号 / Android 版本 |
 | GET | `/api/snapshot?serial=&scale=` | 单张 PNG 截图（无损） |
@@ -213,5 +220,6 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 - 仅支持 Windows / macOS / Linux 桌面端运行（依赖本机 adb），手机浏览器无法使用。
 - **录屏**需要浏览器支持 WebCodecs（Chrome / Edge 94 及以上，Safari 16.4+ 也可以），并依赖设备的 `screenrecord`。
   演示模式（无真机）与个别机型（厂商裁剪 / 编码器被占用）无法录屏，此时会自动回退到截图模式并给出提示。
-- 无线调试需设备与电脑同一局域网，并先 `adb tcpip 5555`。
+- 无线调试需设备与电脑同一局域网。Android 11+ 打开「无线调试」后可直接用 mDNS 自动发现并配对（需 adb 支持 `mdns`）；
+  老设备 / 老 adb 则先 `adb tcpip 5555` 再手输 `ip:5555`。
 - 未实现模板匹配、多点找色；如需可在此基础上扩展 `/api/findColor` 的同族算法。

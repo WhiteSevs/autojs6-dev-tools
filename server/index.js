@@ -2,10 +2,13 @@ import { WebSocketServer } from 'ws'
 import {
   adbConnect,
   adbDisconnect,
+  adbPair,
   capturePng,
   getAdbVersion,
   getDeviceInfo,
   listDevices,
+  mdnsCheck,
+  mdnsServices,
   runAdb,
   shellDragAndDrop,
   shellKey,
@@ -159,7 +162,11 @@ async function enrichDevices() {
   const devices = await listDevices()
   const enriched = []
   for (const d of devices) {
-    const item = { ...d, label: d.model ? `${d.model} (${d.serial})` : d.serial, ready: d.state === 'device' }
+    const base = d.model || d.mdnsName || d.serial
+    // mDNS 设备的序列号是一长串 adb-xxx-yyy._tcp，直接塞进下拉框没法看，统一标成「无线调试」
+    const label =
+      d.kind === 'mdns' ? `${base}（无线调试）` : d.model ? `${d.model} (${d.serial})` : d.serial
+    const item = { ...d, label, ready: d.state === 'device' }
     if (item.ready) {
       try {
         const info = await getDeviceInfo(d.serial)
@@ -186,6 +193,41 @@ async function enrichDevices() {
   return enriched
 }
 
+/* ------------------------------ mDNS 局域网设备 ------------------------------ */
+/**
+ * 把 mDNS 原始记录按「设备 + 服务类型」聚合：
+ * 同一台设备常留下多个端口的旧记录（等 TTL 过期），前端按 addresses 顺序逐个试连即可。
+ */
+function groupLanServices(services, connectedSerials = new Set()) {
+  const groups = new Map()
+  for (const s of services) {
+    if (s.kind === 'other') continue
+    const key = `${s.kind}|${s.deviceKey}`
+    let group = groups.get(key)
+    if (!group) {
+      group = {
+        kind: s.kind,
+        name: s.name,
+        deviceKey: s.deviceKey,
+        host: s.host,
+        address: s.address,
+        port: s.port,
+        addresses: [],
+        connected: false,
+      }
+      groups.set(key, group)
+    }
+    if (!group.addresses.includes(s.address)) group.addresses.push(s.address)
+    if (connectedSerials.has(s.address)) group.connected = true
+  }
+  // 可直连的排在待配对的前面；同类里已在线的排前面
+  return [...groups.values()].sort((a, b) => {
+    if (a.connected !== b.connected) return a.connected ? -1 : 1
+    if (a.kind !== b.kind) return a.kind === 'connect' ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+}
+
 /* ------------------------------ 路由处理 ------------------------------ */
 async function handleApi(req, res, url) {
   const p = url.pathname
@@ -205,6 +247,66 @@ async function handleApi(req, res, url) {
     } catch (err) {
       return sendJson(res, { ok: false, adb: env, error: err.message, devices: [] })
     }
+  }
+
+  // 局域网设备发现：adb 编了 mdns 支持就用 mDNS 扫（Android 11+ 无线调试），否则 supported=false
+  if (p === '/api/mdns') {
+    const force = q.get('refresh') === '1'
+    const probe = await mdnsCheck({ force })
+    if (!probe.ok) {
+      return sendJson(res, {
+        ok: true,
+        supported: false,
+        reason: probe.reason,
+        message: probe.message,
+        services: [],
+      })
+    }
+    try {
+      const result = await mdnsServices({ force })
+      let known = []
+      try {
+        known = await listDevices()
+      } catch {}
+      const serialSet = new Set(known.map((d) => d.serial))
+      const byHost = new Map()
+      /** 已经在线（已连上）的 mDNS 设备：serial 是 adb-xxx._adb-tls-connect._tcp，只能按设备 id 对 */
+      const readyMdns = new Map()
+      for (const d of known) {
+        if (d.state !== 'device') continue
+        if (d.kind === 'network') {
+          const host = d.serial.split(':')[0]
+          if (host && !byHost.has(host)) byHost.set(host, d)
+        } else if (d.kind === 'mdns' && d.mdnsName) {
+          const key = d.mdnsName.split('-').slice(0, 2).join('-').toLowerCase()
+          if (key) readyMdns.set(key, d)
+        }
+      }
+      const services = groupLanServices(result.services, serialSet).map((g) => {
+        const hit = byHost.get(g.host) || readyMdns.get(g.deviceKey)
+        return {
+          ...g,
+          model: hit?.model || '',
+          serial: hit?.serial || '',
+          connected: g.connected || readyMdns.has(g.deviceKey),
+          online: !!hit && hit.state === 'device',
+        }
+      })
+      return sendJson(res, { ok: true, supported: true, services })
+    } catch (err) {
+      return sendJson(res, { ok: true, supported: true, error: err.message, services: [] })
+    }
+  }
+
+  // 无线调试配对：6 位配对码来自设备屏幕上的「使用配对码配对设备」
+  if (p === '/api/pair' && req.method === 'POST') {
+    const body = await readBody(req)
+    const address = String(body.address || '').trim()
+    const code = String(body.code || '').replace(/\D/g, '')
+    if (!address) return sendJson(res, { ok: false, error: '缺少 address' }, 400)
+    if (code.length !== 6) return sendJson(res, { ok: false, error: '配对码应为 6 位数字' }, 400)
+    const r = await adbPair(address, code)
+    return sendJson(res, r)
   }
 
   if (p === '/api/connect' && req.method === 'POST') {

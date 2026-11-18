@@ -69,6 +69,22 @@ export async function getAdbVersion() {
   }
 }
 
+/** `adb devices` 里可能出现的设备状态（按词长优先排，避免被前缀词误判） */
+const DEVICE_STATES = [
+  'no permissions',
+  'unauthorized',
+  'connecting',
+  'authorizing',
+  'bootloader',
+  'recovery',
+  'sideload',
+  'offline',
+  'rescue',
+  'device',
+  'host',
+]
+const DEVICE_LINE_RE = new RegExp(`^(.+?)\\s+(${DEVICE_STATES.join('|')})(?=\\s|$)\\s*(.*)$`)
+
 /** 解析 `adb devices -l` */
 export async function listDevices() {
   const r = await runAdb(['devices', '-l'], { timeout: 15000 })
@@ -77,13 +93,22 @@ export async function listDevices() {
   for (const raw of r.text.split('\n')) {
     const line = raw.trim()
     if (!line || line.startsWith('List of devices') || line.startsWith('*')) continue
-    const [serial, state, ...rest] = line.split(/\s+/)
-    if (!serial) continue
+    // 序列号本身可能含空格：mDNS 设备名重复时 adb 会给出 "adb-xxx-yyy (2)._adb-tls-connect._tcp"，
+    // 直接按空白切分会把状态读成那段后缀。改为按「已知状态词」定位分隔点。
+    const m = line.match(DEVICE_LINE_RE)
+    if (!m) continue
+    const serial = m[1].trim()
+    const state = m[2]
+    const rest = m[3] || ''
     const meta = {}
-    for (const token of rest) {
-      const idx = token.indexOf(':')
-      if (idx > 0) meta[token.slice(0, idx)] = token.slice(idx + 1)
+    if (state !== 'no permissions') {
+      for (const token of rest.trim().split(/\s+/)) {
+        const idx = token.indexOf(':')
+        if (idx > 0) meta[token.slice(0, idx)] = token.slice(idx + 1)
+      }
     }
+    // 新版 adb 会把自己通过 mDNS 发现的设备也列出来，序列号形如 adb-xxx-yyy._adb-tls-connect._tcp
+    const mdnsMatch = serial.match(/^(.*?)_adb-tls-(?:connect|pairing)\._tcp\.?$/i)
     devices.push({
       serial,
       state,
@@ -91,10 +116,104 @@ export async function listDevices() {
       product: meta.product || '',
       device: meta.device || '',
       transportId: meta.transport_id || '',
-      kind: /:\d+$/.test(serial) ? 'network' : 'usb',
+      kind: mdnsMatch ? 'mdns' : /:\d+$/.test(serial) ? 'network' : 'usb',
+      // mDNS 设备名 = 去掉服务类型与重名后缀后的实例名
+      mdnsName: mdnsMatch
+        ? mdnsMatch[1]
+            .replace(/\.$/, '')
+            .replace(/\s*\(\d+\)$/, '')
+            .trim()
+        : '',
     })
   }
   return devices
+}
+
+/* ------------------------------ mDNS 局域网发现 ------------------------------ */
+/**
+ * mDNS 发现（Android 11+ 无线调试）依赖平台的 adb 是否编译了 mdns 支持：
+ * 老 adb 没有 `mdns` 子命令，部分 Windows 版本会直接回 unsupported / disabled。
+ * 所以这里不猜版本号，直接以 `adb mdns check` 的真实输出为准，并把结果缓存一会儿，
+ * 免得每次刷新设备列表都多起一个进程。
+ */
+let mdnsProbe = null
+
+export async function mdnsCheck({ force = false } = {}) {
+  if (!force && mdnsProbe && Date.now() - mdnsProbe.at < 60_000) return mdnsProbe.result
+  let result
+  try {
+    const r = await runAdb(['mdns', 'check'], { timeout: 8000 })
+    const text = `${r.text}\n${r.stderr}`.trim()
+    const yes = /mdns daemon version/i.test(text)
+    const unsupported = /not supported|unknown command|unrecognized|usage: adb mdns/i.test(text)
+    result = {
+      ok: yes,
+      supported: yes,
+      enabled: yes,
+      reason: yes ? '' : unsupported ? 'unsupported' : 'disabled',
+      message: text.split('\n').map((s) => s.trim()).filter(Boolean)[0] || '',
+    }
+  } catch (err) {
+    result = {
+      ok: false,
+      supported: false,
+      enabled: false,
+      reason: /未知|unknown|timeout|超时/i.test(err.message) ? 'unsupported' : 'error',
+      message: err.message,
+    }
+  }
+  mdnsProbe = { at: Date.now(), result }
+  return result
+}
+
+/** 设备 id：`adb-78ac2eb7-u8tR1e` → `adb-78ac2eb7`，用来把配对服务与连接服务对到同一台机器上 */
+function mdnsDeviceKey(name) {
+  const m = String(name).match(/^(adb-[0-9a-z]+)/i)
+  return m ? m[1].toLowerCase() : String(name).toLowerCase()
+}
+
+/**
+ * 解析 `adb mdns services`，输出：
+ *   adb-78ac2eb7-u8tR1e (2)	_adb-tls-connect._tcp	172.19.58.153:45387
+ * 同一台设备可能同时有多个端口记录（旧记录要等 TTL 过期），按设备名聚合后前端依次尝试。
+ */
+export async function mdnsServices({ force = false } = {}) {
+  const probe = await mdnsCheck({ force })
+  if (!probe.ok) return { ...probe, services: [], raw: '' }
+
+  const r = await runAdb(['mdns', 'services'], { timeout: 12000 })
+  const text = `${r.text}\n${r.stderr}`.trim()
+  const services = []
+  for (const raw of r.text.split('\n')) {
+    const line = raw.trim()
+    if (!line || /^List of discovered/i.test(line) || line.startsWith('*')) continue
+    const [name, serviceType, addr] = line.split(/\s+/)
+    if (!name || !serviceType || !addr) continue
+    const m = addr.match(/^(.+):(\d+)$/)
+    if (!m) continue
+    const port = Number(m[2])
+    if (!Number.isFinite(port)) continue
+    const kind = /pairing/i.test(serviceType) ? 'pairing' : /connect/i.test(serviceType) ? 'connect' : 'other'
+    services.push({
+      // 去掉 mDNS 给重名记录加的 " (2)" 后缀，同一个 key 视为同一台设备的同一个服务
+      name: name.replace(/\s*\(\d+\)$/, ''),
+      displayName: name,
+      deviceKey: mdnsDeviceKey(name),
+      serviceType,
+      host: m[1],
+      port,
+      address: `${m[1]}:${port}`,
+      kind,
+    })
+  }
+  return { ...probe, services, raw: text }
+}
+
+/** 无线调试配对：`adb pair <ip:port> <6 位配对码>`（配对码来自设备屏幕） */
+export async function adbPair(address, code) {
+  const r = await runAdb(['pair', address, String(code)], { timeout: 30000 })
+  const text = `${r.text}\n${r.stderr}`.trim()
+  return { ok: /Successfully paired/i.test(text), message: text }
 }
 
 export async function adbConnect(address) {
