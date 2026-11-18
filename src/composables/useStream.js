@@ -1,10 +1,15 @@
 import { onBeforeUnmount, ref, shallowRef } from 'vue'
 import { createAnnexBParser } from '../utils/h264'
+import { isLocalEngine } from '../backend/index.js'
+import { openLocalStream } from '../backend/local/stream.js'
 
 /**
- * 实时投屏：与 /ws/screen 建立 WebSocket，接收二进制帧。
+ * 实时投屏：拿一路二进制帧，解成画面。
  *
- * 两种画面来源，线上协议不同：
+ * 两个来源，同一个协议：
+ *  - 「ADB 命令」引擎走 /ws/screen，由开发服务器推帧；
+ *  - 「USB 直连」引擎由页面自己在浏览器里抓（WebUSB），不再有网络环节。
+ * 两者的线格式完全一致，所以下面的解析 / 解码逻辑只有一份：
  *  - 截图（screencap）：[4字节 metaLength][metaJSON][PNG]，PNG 无损，预览像素 = 取色像素
  *  - 录屏（screenrecord）：metaLength 恒为 0，后面是 H.264 裸流，交给 WebCodecs 解码成画面
  *
@@ -23,7 +28,7 @@ export function useStream() {
   /** 录屏彻底失败（设备不支持 / 被占用），上层据此回退到截图模式 */
   const recordFatal = ref('')
 
-  let ws = null
+  let session = null
   let options = { serial: null, fps: 8, scale: 3, mode: 'shot', bitrate: 8_000_000 }
   let manualClose = false
   let reconnectTimer = null
@@ -278,73 +283,72 @@ export function useStream() {
   }
 
   /* ------------------------------ 连接管理 ------------------------------ */
-  function connect(next = {}) {
-    options = { ...options, ...next }
-    manualClose = false
-    clearTimeout(reconnectTimer)
-    resetVideoPipeline()
-    // 先摘掉旧连接的回调再关闭，避免旧 socket 的 close 触发多余的重连循环
-    const previous = ws
-    ws = null
-    if (previous) {
-      previous.onopen = null
-      previous.onmessage = null
-      previous.onerror = null
-      previous.onclose = null
-      try { previous.close() } catch {}
+  /** 文本消息（JSON）的统一入口：两条来源的字段完全一致 */
+  function handleText(msg) {
+    if (msg.type === 'error') {
+      error.value = msg.message
+      // 只有「设备确实从设备列表里消失」或连续多次抓屏失败才判定为掉线；
+      // 单次坏帧（大屏截屏偶发）不算，避免画面来回冻结
+      if (msg.deviceGone === true || Number(msg.failCount) >= 3) {
+        lost.value = true
+      }
     }
+    if (msg.type === 'record') {
+      if (msg.state === 'starting' || msg.state === 'stream') {
+        videoInfo = {
+          deviceWidth: Number(msg.deviceWidth) || 0,
+          deviceHeight: Number(msg.deviceHeight) || 0,
+          bitrate: Number(msg.bitrate) || options.bitrate,
+        }
+      }
+      if (msg.state === 'stream') {
+        // 新的一段录屏从关键帧开始，解码器必须重建
+        resetVideoPipeline()
+        fpsCount = 0
+        fpsWindowAt = 0
+      }
+      if (msg.message && (msg.state === 'error' || msg.state === 'warn' || msg.state === 'fatal')) {
+        error.value = msg.message
+      }
+      if (msg.deviceGone) lost.value = true
+      if (msg.state === 'fatal') {
+        recordFatal.value = msg.message || '录屏启动失败'
+      }
+    }
+    if (msg.type === 'ready') {
+      ready.value = true
+      if (msg.mode === 'record') {
+        videoInfo = videoInfo || { bitrate: Number(msg.bitrate) || options.bitrate }
+      }
+    }
+    if (msg.type === 'config') paused.value = !!msg.paused
+  }
+
+  function onOpen() {
+    error.value = ''
+    paused.value = false
+  }
+
+  /** 服务端推流：/ws/screen */
+  function createWsSession() {
+    let ws
     try {
       ws = new WebSocket(buildUrl())
     } catch (err) {
       error.value = err.message
-      return
+      return null
     }
     ws.binaryType = 'arraybuffer'
-    ws.onopen = () => {
-      error.value = ''
-      paused.value = false
-    }
+    ws.onopen = onOpen
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
         let msg
-        try { msg = JSON.parse(ev.data) } catch { return }
-        if (msg.type === 'error') {
-          error.value = msg.message
-          // 只有「设备确实从 adb 列表里消失」或连续多次抓屏失败才判定为掉线；
-          // 单次坏帧（大屏截屏偶发）不算，避免画面来回冻结
-          if (msg.deviceGone === true || Number(msg.failCount) >= 3) {
-            lost.value = true
-          }
+        try {
+          msg = JSON.parse(ev.data)
+        } catch {
+          return
         }
-        if (msg.type === 'record') {
-          if (msg.state === 'starting' || msg.state === 'stream') {
-            videoInfo = {
-              deviceWidth: Number(msg.deviceWidth) || 0,
-              deviceHeight: Number(msg.deviceHeight) || 0,
-              bitrate: Number(msg.bitrate) || options.bitrate,
-            }
-          }
-          if (msg.state === 'stream') {
-            // 新的一段录屏从关键帧开始，解码器必须重建
-            resetVideoPipeline()
-            fpsCount = 0
-            fpsWindowAt = 0
-          }
-          if (msg.message && (msg.state === 'error' || msg.state === 'warn' || msg.state === 'fatal')) {
-            error.value = msg.message
-          }
-          if (msg.deviceGone) lost.value = true
-          if (msg.state === 'fatal') {
-            recordFatal.value = msg.message || '录屏启动失败'
-          }
-        }
-        if (msg.type === 'ready') {
-          ready.value = true
-          if (msg.mode === 'record') {
-            videoInfo = videoInfo || { bitrate: Number(msg.bitrate) || options.bitrate }
-          }
-        }
-        if (msg.type === 'config') paused.value = !!msg.paused
+        handleText(msg)
         return
       }
       handleBinary(ev.data)
@@ -359,13 +363,51 @@ export function useStream() {
         reconnectTimer = setTimeout(() => connect(), 1500)
       }
     }
+    return {
+      send: (payload) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload))
+      },
+      close: () => {
+        // 先摘掉回调再关，避免旧 socket 的 close 触发多余的重连循环
+        ws.onopen = null
+        ws.onmessage = null
+        ws.onerror = null
+        ws.onclose = null
+        try {
+          ws.close()
+        } catch {}
+      },
+    }
+  }
+
+  /** 浏览器直连：页面自己抓帧，没有网络环节 */
+  function createLocalSession() {
+    const handle = openLocalStream(
+      { ...options, mode: options.mode === 'record' ? 'record' : 'shot' },
+      { onText: handleText, onBinary: handleBinary },
+    )
+    onOpen()
+    return {
+      send: (payload) => handle.send(payload),
+      close: () => handle.close(),
+    }
+  }
+
+  function connect(next = {}) {
+    options = { ...options, ...next }
+    manualClose = false
+    clearTimeout(reconnectTimer)
+    resetVideoPipeline()
+    session?.close()
+    session = null
+    session = isLocalEngine() ? createLocalSession() : createWsSession()
   }
 
   function send(payload) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload))
+    session?.send(payload)
   }
 
-  /** 远程触控：走同一条 WebSocket，拖动时每秒几十个事件也不用额外开 HTTP 请求 */
+  /** 远程触控：走同一条画面会话，拖动时每秒几十个事件也不用额外开请求 */
   function sendTouch(payload) {
     send({ type: 'touch', ...payload })
   }
@@ -398,10 +440,8 @@ export function useStream() {
   function close() {
     manualClose = true
     clearTimeout(reconnectTimer)
-    if (ws) {
-      try { ws.close() } catch {}
-      ws = null
-    }
+    session?.close()
+    session = null
     resetVideoPipeline()
     ready.value = false
   }

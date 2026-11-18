@@ -495,6 +495,17 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ok: true, ...st, env: await engineEnv() })
   }
 
+  /**
+   * 释放 adb server 对 USB 接口的独占。
+   * 「USB 直连」现在跑在浏览器里（WebUSB），而 adb server 握着接口时浏览器根本 claim 不到
+   * （Windows 上就是 error 5）。浏览器自己没法执行 adb 命令，所以切换引擎时让服务端代劳；
+   * adb 需要时会自动把 server 再拉起来。
+   */
+  if (p === '/api/release-adb' && req.method === 'POST') {
+    const r = await engine.releaseAdbServer()
+    return sendJson(res, { ok: r.ok, message: r.message })
+  }
+
   if (p === '/api/devices') {
     const env = await engineEnv()
     if (!env.ok) return sendJson(res, { ok: false, adb: env, error: env.error || '连接引擎不可用', devices: [] })

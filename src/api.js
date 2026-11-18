@@ -1,101 +1,10 @@
-const BASE = ''
-
-async function attempt(url, options) {
-  return fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
-}
-
-async function request(path, options = {}) {
-  const url = BASE + path
-  let res
-  try {
-    res = await attempt(url, options)
-  } catch (err) {
-    // 开发服务器回收空闲连接后，浏览器复用失效 socket 会抛 TypeError，重试一次即可
-    try {
-      await new Promise((r) => setTimeout(r, 120))
-      res = await attempt(url, options)
-    } catch (err2) {
-      throw new Error(`请求 ${url} 失败：${err2.message}`)
-    }
-  }
-  const text = await res.text()
-  let data
-  try {
-    data = text ? JSON.parse(text) : {}
-  } catch {
-    throw new Error(`返回内容不是 JSON：${text.slice(0, 120)}`)
-  }
-  if (!res.ok && data.ok !== false) {
-    throw new Error(data.error || `请求失败（HTTP ${res.status}）`)
-  }
-  if (data.ok === false) throw new Error(data.error || '请求失败')
-  return data
-}
-
-export const api = {
-  env: () => request('/api/env'),
-  /** 连接引擎状态：{ current, engines: [{ id, label, desc, ok, detail, error, hint }] } */
-  settings: () => request('/api/settings'),
-  /** 切换连接引擎：adb（adb 命令） / webusb（USB 直连） */
-  setEngine: (engine) => request('/api/settings', { method: 'POST', body: JSON.stringify({ engine }) }),
-  devices: () => request('/api/devices'),
-  /** mDNS 局域网设备发现（Android 11+ 无线调试）；refresh=true 时跳过服务端 60s 探测缓存 */
-  mdns: (refresh = false) => request(`/api/mdns${refresh ? '?refresh=1' : ''}`),
-  /** 无线调试配对：code 为手机屏幕上的 6 位配对码 */
-  pair: (address, code) => request('/api/pair', { method: 'POST', body: JSON.stringify({ address, code }) }),
-  connect: (address) => request('/api/connect', { method: 'POST', body: JSON.stringify({ address }) }),
-  disconnect: (address) => request('/api/disconnect', { method: 'POST', body: JSON.stringify({ address }) }),
-  info: (serial) => request(`/api/info?serial=${encodeURIComponent(serial)}`),
-  pixel: (serial, x, y, frameId, fresh) =>
-    request('/api/pick', {
-      method: 'POST',
-      body: JSON.stringify({ serial, x: Math.round(x), y: Math.round(y), frameId, fresh: !!fresh }),
-    }),
-  findColor: (payload) => request('/api/findColor', { method: 'POST', body: JSON.stringify(payload) }),
-  tap: (serial, x, y) =>
-    request('/api/tap', { method: 'POST', body: JSON.stringify({ serial, x, y }) }),
-  swipe: (payload) => request('/api/swipe', { method: 'POST', body: JSON.stringify(payload) }),
-  /** 长按拖拽（draganddrop）：用于图标排序 / 拖放这类「按住再移动」的手势 */
-  drag: (payload) => request('/api/drag', { method: 'POST', body: JSON.stringify(payload) }),
-  key: (serial, key) => request('/api/key', { method: 'POST', body: JSON.stringify({ serial, key }) }),
-  /** 锁屏 / 解锁：action = 'lock' | 'unlock' */
-  screen: (serial, action) => request('/api/screen', { method: 'POST', body: JSON.stringify({ serial, action }) }),
-  uploadImage: (payload) => request('/api/image', { method: 'POST', body: JSON.stringify(payload) }),
-  snapshotUrl: (serial, scale = 1) =>
-    `/api/snapshot?serial=${encodeURIComponent(serial)}&scale=${scale}&t=${Date.now()}`,
-}
-
 /**
- * 按 1:1 原始像素导出截图（整屏或指定区域）
- * @returns {Promise<Blob>} PNG（无损）
+ * 前端对外的统一入口。
+ *
+ * 具体走哪条后端（开发服务器 / 浏览器 USB 直连）由 ./backend/index.js 决定，
+ * 组件只从这儿拿 api / shotBlob，以及几个纯浏览器的小工具。
  */
-export async function shotBlob(payload) {
-  const url = '/api/shot'
-  const options = {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  }
-  let res
-  try {
-    res = await fetch(url, options)
-  } catch {
-    await new Promise((r) => setTimeout(r, 150))
-    res = await fetch(url, options)
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    let message = text
-    try {
-      message = JSON.parse(text).error || text
-    } catch {}
-    throw new Error(message || `截图失败（HTTP ${res.status}）`)
-  }
-  return res.blob()
-}
+export { api, boot, dispose, runtime, setEngine, shotBlob } from './backend/index.js'
 
 /** 触发浏览器下载 */
 export function downloadBlob(blob, filename) {

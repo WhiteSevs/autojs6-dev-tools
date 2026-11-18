@@ -3,19 +3,23 @@
 面向 [AutoJs6](https://github.com/SuperMonster003/AutoJs6) 脚本开发的辅助工具：在浏览器里直接看到手机画面，
 拖一下就拿到区域的 `x / y / w / h`，点一下就拿到锚点坐标与精确颜色，并直接生成可粘贴的 AutoJs6 代码。
 
-技术栈：**Vite + Vue 3 + Element Plus**，后端逻辑以 Vite 插件形式内置（`server/`），通过 **ADB** 与 Android 设备通信。
+技术栈：**Vite + Vue 3 + Element Plus**。两条连接引擎互相独立：**ADB 命令**由 Vite 插件形式的服务端（`server/`）调用 `adb`；
+**USB 直连**整个跑在浏览器里（WebUSB + [Tango](https://github.com/yume-chan/ya-webadb)），不依赖任何 Node 后端 ——
+所以 `npm run build` 出来的静态页面放到任意静态空间里，插上手机就能用。
 
 ## 功能
 
 - **设备连接**：自动列出 `adb devices` 中的设备，支持 USB 与无线（`adb connect ip:port`）；点「无线连接」后输入框自动聚焦，回车即连接，成功后弹窗自动收起并切到该设备；连接的地址会存进「最近连接」（本地持久化，按时间倒序，可单条删除、点一下直接连）。
-- **两种连接引擎（设置 → 通用 → 连接引擎）**：服务端和手机之间的通道有两条，随时可切，选择记在项目根的
-  `.adb-helper.json`（已 gitignore）：
-  - **ADB 命令**（默认）：起 `adb` 命令（platform-tools），功能最全 —— 无线调试、mDNS 局域网发现与配对都靠它。
-  - **USB 直连**：用内置的 [Tango](https://github.com/yume-chan/ya-webadb)（`@yume-chan/adb`）+ `usb` 包，
-    直接和手机上的 adbd 说 ADB 协议，**不需要安装 platform-tools**。截图、录屏、`input` 操作全部照常，
-    认证复用 `~/.android/adbkey`（之前授权过就不用再点手机）。
-  - 两个引擎**互斥**：USB 接口同一时刻只能被一个程序占用，切到「USB 直连」前先 `adb kill-server`，
-    否则会提示接口被占用；Windows 上要求 ADB 接口绑定 WinUSB 驱动（Google USB Driver 与多数厂商驱动都是）。
+- **两种连接引擎（设置 → 通用 → 连接引擎）**：和手机通信的通道有两条，随时可切，选择记在浏览器 localStorage：
+  - **ADB 命令**（有开发服务器时的默认项）：由开发服务器起 `adb` 命令（platform-tools），功能最全 —— 无线调试、mDNS 局域网发现与配对都靠它。
+  - **USB 直连**：浏览器用 **WebUSB** 直接和手机上的 adbd 说 ADB 协议（内置 [Tango](https://github.com/yume-chan/ya-webadb) 协议栈），
+    **不需要 platform-tools，也不需要 Node 后端** —— 截图、录屏、取色、`input` 操作、远程触控全部照常。
+    首次使用点顶栏 **「USB 设备」** 授权（WebUSB 规定必须由用户点击触发）；私钥存在本机浏览器里，
+    手机上允许过一次（勾「一律允许」）之后就不必再点。
+  - 两个引擎**互斥**：USB 接口同一时刻只能被一个程序占用。从「ADB 命令」切到「USB 直连」时，
+    前端会让开发服务器代跑一次 `adb kill-server` 把接口腾出来（没有后端时请手动执行）；
+    切回「ADB 命令」则不受影响，adb server 会在下一条命令时自己起来。
+  - Windows 上要求 ADB 接口绑定 WinUSB 驱动（Google USB Driver 与多数厂商驱动都是）。
   - 「USB 直连」不支持 Android 11+ 的无线调试配对与 mDNS 发现（这两项能力长在 adb 自己身上），
     切过去后「无线连接」入口会自动隐藏。
 - **局域网设备自动发现（mDNS）**：adb 支持 `mdns` 时（platform-tools 30+，`adb mdns check` 能返回 daemon 版本），
@@ -25,8 +29,9 @@
   当前 adb 没编 mdns（老版本 / `adb mdns check` 报 unsupported）时不显示列表，退回手输地址 + `adb tcpip 5555` 的老路子。
 - **两种数据源**：可以取真机实时画面，也可以**上传本地图片**（或直接把图片拖到画面里）做区域坐标与锚点取色；
   图片会被归一化成 PNG 交给同一套取色 / 找色 / 裁剪管线，所以坐标与颜色跟真机完全一致，与设备无关时也能用。
-- **实时投屏**：服务端 `adb exec-out screencap -p` 抓帧 → sharp 缩放后以 **PNG 无损**推流 → WebSocket 推送，支持刷新率与清晰度调节，
-  **清晰度可选「原画 1:1」**，按设备真实像素推送（3200×1440 每帧约 2.6MB）。
+- **实时投屏**：`screencap -p` 抓帧 → 按「画质」缩放后以 **PNG 无损**上屏，支持刷新率与清晰度调节，
+  **清晰度可选「原画 1:1」**，按设备真实像素显示（3200×1440 每帧约 2.6MB）。
+  「ADB 命令」引擎由服务端抓帧、经 WebSocket 推过来；「USB 直连」引擎在页面里抓帧，一步到屏。
 - **画面来源可切换（截图 / 录屏）**：左侧「画面 → 来源」二选一。
   **截图**沿用 `screencap`，像素无损但帧率受截屏速度限制；**录屏**改用 `screenrecord` 输出 H.264 流，
   浏览器用 **WebCodecs** 硬解码，可跑到 50–60 fps，**码率可调**（降序：100 / 20 / 16 / 12 / 10 / 8 / 6 / 4 / 2 Mbps，默认最高档）。
@@ -148,18 +153,21 @@
 
 ## 环境要求
 
-- Node.js ≥ 18
-- Android Platform Tools（`adb` 在 PATH 中，或用 `ADB_PATH` 指定绝对路径）
+- **USB 直连（纯前端）**：Chrome / Edge 89+（WebUSB + WebCodecs），页面走 `http://localhost`、`http://127.0.0.1` 或 https
+  （`file://` 直接双击打不开：模块脚本会被 CORS 拦下，WebUSB 也不可用）
+- **ADB 命令（可选）**：Node.js ≥ 18、Android Platform Tools（`adb` 在 PATH 中，或用 `ADB_PATH` 指定绝对路径）
 - 设备已开启「USB 调试」并在手机上点击「允许 USB 调试」
 
 ## 启动
+
+### 方式一：开发模式（带 ADB 命令引擎）
 
 ```bash
 npm install
 npm run dev          # 打开 http://127.0.0.1:5174
 ```
 
-> 该工具依赖 Vite 开发服务器提供的 `/api/*` 与 `/ws/screen`，请使用 `npm run dev`（`npm run build` 仅生成静态资源，不含设备通信后端）。
+> 开发服务器提供 `/api/*` 与 `/ws/screen`，「ADB 命令」引擎（含无线调试 / mDNS 发现）靠它。
 
 指定 adb 路径：
 
@@ -169,6 +177,18 @@ set ADB_PATH=D:\platform-tools\adb.exe && npm run dev
 # macOS / Linux
 ADB_PATH=/Users/me/platform-tools/adb npm run dev
 ```
+
+### 方式二：静态打包（纯前端，USB 直连）
+
+```bash
+npm run build        # 产物在 dist/，资源全部是相对路径
+npm run preview      # 或把 dist/ 丢到任意静态服务器 / 子目录下
+```
+
+产物只依赖 HTML/CSS/JS，可以直接放在 `https://example.com/tools/autojs6/` 这样的子路径下
+（`vite.config.js` 里 `base: './'`，不会再出现资源跑到站点根目录 404 的问题）。
+这种模式下打开页面会**自动切到「USB 直连」**，点顶栏「USB 设备」授权后即可投屏、取色、触控；
+「ADB 命令」会显示为不可用（没有开发服务器），无线调试与 mDNS 发现也就用不了。
 
 ## 使用流程
 
@@ -197,21 +217,27 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 - **全链路 PNG 无损**：投屏帧、区域导出、整屏截图、剪贴板图片都是 PNG，没有任何有损压缩环节。
   `scale > 1` 时用 nearest 邻近采样缩放（不是插值），预览里不会出现设备上不存在的颜色，但若干相邻像素会合并成一个色块；
   需要逐像素精确取色时请用 **原画 1:1**，此时帧字节与设备截图完全一致（见下条）。
-- **原画 1:1 直接透传**：`scale = 1` 时服务端不重编码，直接把 `screencap` 的原始 PNG 字节推给前端（0ms、字节级一致，实测比 sharp 重编码体积还小）。
-- PNG 帧比 JPEG 大（1.5K 屏原画约 3MB/帧），走本机回环传输没有压力；`compressionLevel` 只影响缩放帧的体积与编码耗时，不影响任何像素值。
+- **原画 1:1 直接透传**：`scale = 1` 时不做任何重编码，直接把 `screencap` 的原始 PNG 字节交给上屏逻辑（字节级一致）。
+  「ADB 命令」引擎由服务端透传，「USB 直连」引擎在浏览器里透传，两条路的表现一样。
+- PNG 帧比 JPEG 大（1.5K 屏原画约 3MB/帧），走本机回环 / USB 都没有压力。
 - 画面刷新率取决于设备 `screencap` 速度（Windows 下 1080p 通常 0.7–1.5 fps，2K/1.5K 屏可能 0.3–0.5 fps）。
   逐个像素级的精确取色必须依赖完整截图，因此这里优先保证「值正确」而非「画面流畅」。状态栏会显示真实帧率与单帧耗时。
-- 服务端保留最近 6 帧原始截图（环形缓冲）：前端请求携带 `frameId`，取色/找色直接命中**你正在看的那一帧**，
-  既避免重复截屏，也避免「画面与取到的颜色不一致」。
-- **录屏模式（`screenrecord`）**：`adb exec-out screenrecord --output-format=h264 --bit-rate=… --size=… -` 把 H.264 裸流
+- 帧缓冲（最近 6 帧原始截图，环形缓冲）：前端请求携带 `frameId`，取色/找色直接命中**你正在看的那一帧**，
+  既避免重复截屏，也避免「画面与取到的颜色不一致」。服务端引擎存在服务进程里，USB 直连引擎存在页面内存里。
+- **录屏模式（`screenrecord`）**：`screenrecord --output-format=h264 --bit-rate=… --size=… -` 把 H.264 裸流
   按块推给前端，前端用 `Annex-B` 解析成访问单元后交给 WebCodecs `VideoDecoder` 解码，**解出多少帧就上屏多少帧**
   （实测 2880×1800 稳定 60 fps，单帧 `createImageBitmap` + 上屏约 0.6ms）。
   这一路是**有损**的（码率越低越糊），所以只用来「看」：取色、找色、保存区域图都会临时截一帧无损 PNG，
   录屏本身对取色结果没有任何影响。
-  `screenrecord` 单次上限 180 秒，到点由服务端自动续录并从关键帧重建解码器，画面不会中断。
+  `screenrecord` 单次上限 180 秒，到点自动续录并从关键帧重建解码器，画面不会中断。
   「画质」在录屏模式下换算成 `--size`（按 16 对齐），设备横竖屏切换后重开一次录屏即可重新测量尺寸。
+- **缩放与裁剪在浏览器里做**：「USB 直连」引擎用 Canvas 完成（缩放关闭 `imageSmoothing`，等价于服务端的 nearest 采样），
+  所以缩放帧里不会出现设备上不存在的颜色；区域导出与整屏保存都是 1:1 原始像素。
 
 ## 接口一览
+
+> 只有「ADB 命令」引擎用这些接口。「USB 直连」全部在页面里完成，不产生任何网络请求 ——
+> 静态部署时这些接口不存在也没关系。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -220,6 +246,7 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 | GET | `/api/mdns?refresh=` | 局域网设备发现：返回 `{ supported, services[] }`；`supported=false` 表示当前 adb 没编 mdns 支持 |
 | POST | `/api/pair` | 无线调试配对 `{ address, code }`（`code` 为手机屏幕上的 6 位配对码） |
 | POST | `/api/connect` | 无线连接 `{ address }` |
+| POST | `/api/release-adb` | 执行 `adb kill-server`，把 USB 接口让给浏览器里的「USB 直连」（切引擎时前端自动调用） |
 | GET | `/api/info?serial=` | 分辨率 / 密度 / 型号 / Android 版本 |
 | GET | `/api/snapshot?serial=&scale=` | 单张 PNG 截图（无损） |
 | POST | `/api/shot` | 1:1 原始像素截图 `{ serial, frameId, region?, fresh? }`，返回 PNG（无损） |
@@ -233,11 +260,16 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 | WS | `/ws/screen?serial=&fps=&scale=&level=&mode=&bitrate=` | 投屏推流（`mode=screenshot` 走 PNG 无损；`mode=record` 走 H.264 裸流，`bitrate` 单位 bps） |
 | WS 消息 | `{ type: "touch", phase, x, y }` | 远程触控：`phase` = `down` / `move` / `up` / `cancel`，走同一条投屏连接，实时注入到真机 |
 
+「USB 直连」引擎在页内复用同一套消息格式（`src/backend/local/stream.js` 就是跑在浏览器里的那个「服务端」），
+所以两条引擎的画面手感、取色语义、触控行为是一致的。
+
 ## 已知限制
 
-- 仅支持 Windows / macOS / Linux 桌面端运行（依赖本机 adb），手机浏览器无法使用。
+- **USB 直连**需要 Chrome / Edge（WebUSB + WebCodecs）与安全上下文（localhost / 127.0.0.1 / https）；
+  Firefox、Safari 暂不支持 WebUSB，用 `file://` 直接双击打开也不行 —— 请用任意静态服务器托管 `dist/`。
+- **ADB 命令**只在 `npm run dev` 下可用（要起 adb 进程、读 `~/.android/adbkey`）；纯静态部署时用不了无线调试与 mDNS 发现。
 - **录屏**需要浏览器支持 WebCodecs（Chrome / Edge 94 及以上，Safari 16.4+ 也可以），并依赖设备的 `screenrecord`。
   演示模式（无真机）与个别机型（厂商裁剪 / 编码器被占用）无法录屏，此时会自动回退到截图模式并给出提示。
 - 无线调试需设备与电脑同一局域网。Android 11+ 打开「无线调试」后可直接用 mDNS 自动发现并配对（需 adb 支持 `mdns`）；
   老设备 / 老 adb 则先 `adb tcpip 5555` 再手输 `ip:5555`。
-- 未实现模板匹配、多点找色；如需可在此基础上扩展 `/api/findColor` 的同族算法。
+- 未实现模板匹配、多点找色；如需可在此基础上扩展 `/api/findColor` 的同族算法（前端版在 `src/backend/local/raster.js`）。

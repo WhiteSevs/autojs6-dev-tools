@@ -62,6 +62,17 @@
               <el-icon v-if="!loadingDevices"><Refresh /></el-icon>
             </el-button>
 
+            <!-- USB 直连：浏览器要先拿到这台设备的授权（WebUSB 规定必须由点击触发） -->
+            <el-button
+              v-if="usbMode"
+              :loading="usbPicking"
+              :title="usbOk ? '授权另一台 USB 设备' : '选择要连接的 USB 设备（首次需要授权）'"
+              @click="pickUsbDevice"
+            >
+              <el-icon><Connection /></el-icon>
+              <span class="btn-text">&nbsp;USB 设备</span>
+            </el-button>
+
             <el-popover
               v-if="wirelessOk"
               v-model:visible="connectOpen"
@@ -881,6 +892,10 @@ const fps = ref(FPS_OPTIONS[0])
 const scale = ref(1)
 
 const adbOk = computed(() => !!env.value?.ok)
+/** 当前连接引擎：adb（开发服务器）/ webusb（浏览器直连） */
+const engine = computed(() => env.value?.engine || 'adb')
+const usbMode = computed(() => engine.value === 'webusb')
+const usbOk = computed(() => !!env.value?.engines?.find((e) => e.id === 'webusb')?.ok)
 /** 当前引擎的能力集：无线调试 / mDNS 只有 adb 引擎有，入口要跟着隐藏 */
 const currentCapabilities = computed(
   () => (env.value?.engines || []).find((e) => e.id === env.value?.engine)?.capabilities || {},
@@ -935,7 +950,7 @@ async function refreshDevices(preferSerial = '') {
   loadingDevices.value = true
   try {
     const res = await api.devices()
-    env.value = res.adb
+    if (res.adb) env.value = res.adb
     devices.value = res.devices || []
     if (!res.ok && res.error) {
       ElMessage.warning(res.error)
@@ -966,13 +981,37 @@ async function refreshDevices(preferSerial = '') {
   }
 }
 
+/* ---------------------- USB 直连：设备授权 ---------------------- */
+const usbPicking = ref(false)
+
+/**
+ * 弹浏览器的 USB 选择框。
+ * WebUSB 规定 requestDevice 必须由用户手势直接触发，所以这个动作只能挂在按钮点击上，
+ * 不能在页面加载时自动调。授权过的设备之后会被 devices() 静默列出来。
+ */
+async function pickUsbDevice() {
+  if (usbPicking.value) return
+  usbPicking.value = true
+  try {
+    const r = await api.requestUsbDevice()
+    if (!r.serial) return // 用户点了取消
+    await refreshDevices(r.serial)
+    const picked = devices.value.find((d) => d.serial === r.serial)
+    ElMessage.success(picked?.ready === false ? '已授权，设备正在认证…' : '已授权 USB 设备')
+  } catch (err) {
+    ElMessage.error(`选择 USB 设备失败：${err.message}`)
+  } finally {
+    usbPicking.value = false
+  }
+}
+
 /**
  * 切换连接引擎（设置 → 连接引擎）。
- * USB 接口是独占的，换引擎等于换了一条通向设备的通道：
- * 旧设备信息、旧画面帧都不能继续用，所以切完立刻重建推流。
+ * 换引擎等于换了一条通向设备的通道：旧设备信息、旧画面帧都不能继续用，所以切完立刻重建推流。
+ * USB 直连这条路由页面自己实现，切过去时会顺带让开发服务器执行 adb kill-server（接口是独占的）。
  */
 async function switchEngine(id) {
-  if (!id || id === (env.value?.engine || 'adb')) return
+  if (!id || id === engine.value) return
   const before = serial.value
   try {
     const res = await api.setEngine(id)
@@ -982,6 +1021,16 @@ async function switchEngine(id) {
     if (res.warning) ElMessage.warning(res.warning)
     else ElMessage.success(`已切换到「${res.env.engineLabel}」${released}，正在刷新设备`)
     await refreshDevices()
+
+    // 演示模式不该挡在真机前面：换完引擎（尤其是切回 ADB）如果已经能拿到真机，直接切过去
+    const real = devices.value.find((d) => d.ready && d.serial !== 'demo')
+    if (real && (!serial.value || serial.value === 'demo')) {
+      serial.value = real.serial
+      return
+    }
+    // 刚切回 adb 时 server 还在重新枚举设备，稍后再刷一次，免得停在「未检测到设备」
+    if (id === 'adb' && !real) setTimeout(() => refreshDevices(), 1200)
+
     // 设备没变（比如都停在演示模式）时 watch(serial) 不会触发，这里补一次，别让信息面板空着
     if (serial.value === before) {
       await loadInfo()
@@ -1905,7 +1954,21 @@ watch(streamLost, (val) => {
   }
 })
 
+/** USB 热插拔：插上 / 拔掉立刻刷新设备列表，不用手动点刷新 */
+let usbHotplugAt = 0
+function onUsbHotplug() {
+  // Chrome 插拔时会连发几条事件（interface 级 + device 级），节流一下
+  const now = Date.now()
+  if (now - usbHotplugAt < 600) return
+  usbHotplugAt = now
+  refreshDevices()
+}
+
 onMounted(async () => {
+  // 先确认有没有开发服务器、该用哪条连接引擎；没有后端就直接走浏览器 USB 直连
+  try {
+    await api.boot()
+  } catch {}
   try {
     env.value = await api.env()
   } catch {}
@@ -1914,12 +1977,16 @@ onMounted(async () => {
     isLandscape.value = landscapeMql.matches
     landscapeMql.addEventListener('change', syncLandscape)
   } catch {}
+  try {
+    navigator.usb?.addEventListener('connect', onUsbHotplug)
+    navigator.usb?.addEventListener('disconnect', onUsbHotplug)
+  } catch {}
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('keyup', onGlobalKeyup)
   window.addEventListener('paste', onGlobalPaste)
   await refreshDevices()
   if (!serial.value) {
-    // adb 不可用时退回演示模式，保证工具本身可预览
+    // 没有可用设备时退回演示模式，保证工具本身可预览
     const demo = devices.value.find((d) => d.serial === 'demo')
     if (demo) serial.value = 'demo'
   }
@@ -1928,6 +1995,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopLanPoll()
   landscapeMql?.removeEventListener('change', syncLandscape)
+  try {
+    navigator.usb?.removeEventListener('connect', onUsbHotplug)
+    navigator.usb?.removeEventListener('disconnect', onUsbHotplug)
+  } catch {}
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('keyup', onGlobalKeyup)
   window.removeEventListener('paste', onGlobalPaste)

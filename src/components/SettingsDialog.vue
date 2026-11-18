@@ -116,8 +116,11 @@
           <div class="set-text">
             <div class="set-label">连接引擎</div>
             <div class="set-desc">
-              服务端用哪条路径和手机通信。<strong>USB 接口同一时刻只能被一个程序占用</strong>，所以两个引擎互斥：
-              切到「USB 直连」前先 <span class="mono">adb kill-server</span>，切回「ADB 命令」则不受影响。切换后会自动刷新设备列表。
+              用哪条路径和手机通信。<strong>USB 接口同一时刻只能被一个程序占用</strong>：
+              <span class="mono">ADB 命令</span>由开发服务器起 adb 进程（功能最全，含无线调试 / mDNS），
+              <span class="mono">USB 直连</span>直接在浏览器里用 WebUSB 说 ADB 协议 ——
+              不需要 platform-tools，也不需要 Node 后端，打包成静态页面照样能用。
+              从 adb 切到 USB 直连时会自动执行 <span class="mono">adb kill-server</span> 释放接口。
             </div>
           </div>
           <div class="engine-list">
@@ -150,9 +153,11 @@
             <span>路径</span>
             <b class="mono ellipsis">{{ env.adbPath }}</b>
           </div>
-          <div v-if="env?.node" class="about-row">
+          <div v-if="env?.platform" class="about-row">
             <span>运行时</span>
-            <b class="mono">{{ env.platform }} · Node {{ env.node }}</b>
+            <b class="mono">
+              {{ env.platformLabel || env.platform }}<template v-if="env.node"> · Node {{ env.node }}</template>
+            </b>
           </div>
         </div>
       </el-tab-pane>
