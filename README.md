@@ -181,7 +181,7 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 ### 方式二：静态打包（纯前端，USB 直连）
 
 ```bash
-npm run build        # 产物在 dist/，资源全部是相对路径
+npm run build        # 产物在 dist/，资源全部是相对路径；同时把入口同步到根 index.html
 npm run preview      # 或把 dist/ 丢到任意静态服务器 / 子目录下
 ```
 
@@ -189,6 +189,18 @@ npm run preview      # 或把 dist/ 丢到任意静态服务器 / 子目录下
 （`vite.config.js` 里 `base: './'`，不会再出现资源跑到站点根目录 404 的问题）。
 这种模式下打开页面会**自动切到「USB 直连」**，点顶栏「USB 设备」授权后即可投屏、取色、触控；
 「ADB 命令」会显示为不可用（没有开发服务器），无线调试与 mDNS 发现也就用不了。
+
+**入口页的两个身份**（`build/index-entry.js`）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `index.dev.html` | 开发模板（`<script src="/src/main.js">`），`npm run dev` 时 `/` 会自动重写到它，地址仍是 `http://127.0.0.1:5174/` |
+| `index.html`（根目录） | **打包产物入口**，由 `npm run build` 自动生成（勿手改），资源指向 `./dist/assets/…`，所以仓库根目录本身就能当静态站点托管 |
+| `dist/index.html` | `npm run build` 生成的另一份（资源同级 `./assets/…`），给 `npm run preview` 或整体部署 `dist/` 用 |
+
+> 根 `index.html` 引用的 `./dist/assets/` 不在版本库里（`dist/` 已 gitignore）。
+> 如果要从仓库根目录直接部署（例如 GitHub Pages 选 `main` / 根目录），需要把 `dist/` 一起提交，
+> 或改成构建产物直接输出到根目录。
 
 ## 使用流程
 
