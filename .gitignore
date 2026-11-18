@@ -4,3 +4,5 @@ dist/
 *.log
 .DS_Store
 .workbuddy/
+# 本机设置（连接引擎选择等），不进版本库
+.adb-helper.json

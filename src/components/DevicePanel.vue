@@ -37,6 +37,24 @@
       <el-button size="small" :disabled="isDemo" @click="sendKey('back')">返回</el-button>
       <el-button size="small" :disabled="isDemo" @click="sendKey('home')">Home</el-button>
       <el-button size="small" :disabled="isDemo" @click="sendKey('recents')">任务</el-button>
+      <el-button
+        size="small"
+        :disabled="isDemo"
+        :loading="screenBusy === 'lock'"
+        title="关闭屏幕并锁屏（设了密码 / 图案时解锁需要手动输入）"
+        @click="screenAction('lock')"
+      >
+        <el-icon><Lock /></el-icon>&nbsp;锁屏
+      </el-button>
+      <el-button
+        size="small"
+        :disabled="isDemo"
+        :loading="screenBusy === 'unlock'"
+        title="亮屏并划开通知锁；有密码 / 图案时只会送到解锁界面"
+        @click="screenAction('unlock')"
+      >
+        <el-icon><Unlock /></el-icon>&nbsp;解锁
+      </el-button>
     </div>
 
     <div class="touch-block" :class="{ enabled: recordMode, active: liveTouch }">
@@ -62,7 +80,7 @@
         <el-button v-if="liveTouch" size="small" text @click="emit('update:liveTouch', false)">退出触控</el-button>
       </div>
       <div v-if="liveTouch" class="touch-tips">
-        按下 = 按下 · 拖动实时跟随 · 松开 = 抬起
+        按下 = 按下 · 拖动实时跟随 · 松开 = 抬起 · <b>Esc</b> = 返回键
       </div>
     </div>
 
@@ -128,6 +146,22 @@ async function sendKey(key) {
     ElMessage.success(r.message || `已发送 ${key}`)
   } catch (err) {
     ElMessage.error(err.message)
+  }
+}
+
+/** 锁屏 / 解锁：同一时刻只允许一个动作在跑，避免连点把屏幕来回开关 */
+const screenBusy = ref('')
+
+async function screenAction(action) {
+  if (screenBusy.value) return
+  screenBusy.value = action
+  try {
+    const r = await api.screen(props.serial, action)
+    ElMessage.success(r.message || (action === 'lock' ? '已锁屏' : '已解锁'))
+  } catch (err) {
+    ElMessage.error(err.message)
+  } finally {
+    screenBusy.value = ''
   }
 }
 </script>

@@ -1,6 +1,4 @@
-import { spawn } from 'node:child_process'
-
-const ADB_BIN = process.env.ADB_PATH || 'adb'
+import { current } from './engine.js'
 
 /** 抬手后这么久没有新事件就自动松开并收掉 shell，避免前端崩了留下「一直按着」 */
 const IDLE_RELEASE_MS = 3000
@@ -29,11 +27,9 @@ const sessions = new Map()
 const cooldowns = new Map()
 
 function createSession(serial) {
-  const child = spawn(ADB_BIN, ['-s', serial, 'shell'], {
-    windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    shell: false,
-  })
+  // 连接引擎（ADB 命令 / USB 直连）都返回 ChildProcess 形状的通道，
+  // 这里的排队、ack、回收逻辑对两者完全一致
+  const child = current().shell(serial)
   const session = {
     serial,
     child,

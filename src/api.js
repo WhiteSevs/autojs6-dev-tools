@@ -37,6 +37,10 @@ async function request(path, options = {}) {
 
 export const api = {
   env: () => request('/api/env'),
+  /** 连接引擎状态：{ current, engines: [{ id, label, desc, ok, detail, error, hint }] } */
+  settings: () => request('/api/settings'),
+  /** 切换连接引擎：adb（adb 命令） / webusb（USB 直连） */
+  setEngine: (engine) => request('/api/settings', { method: 'POST', body: JSON.stringify({ engine }) }),
   devices: () => request('/api/devices'),
   /** mDNS 局域网设备发现（Android 11+ 无线调试）；refresh=true 时跳过服务端 60s 探测缓存 */
   mdns: (refresh = false) => request(`/api/mdns${refresh ? '?refresh=1' : ''}`),
@@ -57,6 +61,8 @@ export const api = {
   /** 长按拖拽（draganddrop）：用于图标排序 / 拖放这类「按住再移动」的手势 */
   drag: (payload) => request('/api/drag', { method: 'POST', body: JSON.stringify(payload) }),
   key: (serial, key) => request('/api/key', { method: 'POST', body: JSON.stringify({ serial, key }) }),
+  /** 锁屏 / 解锁：action = 'lock' | 'unlock' */
+  screen: (serial, action) => request('/api/screen', { method: 'POST', body: JSON.stringify({ serial, action }) }),
   uploadImage: (payload) => request('/api/image', { method: 'POST', body: JSON.stringify(payload) }),
   snapshotUrl: (serial, scale = 1) =>
     `/api/snapshot?serial=${encodeURIComponent(serial)}&scale=${scale}&t=${Date.now()}`,

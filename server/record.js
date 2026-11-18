@@ -23,12 +23,13 @@ export function fitRecordSize(screen, scale) {
 }
 
 /**
- * 启动一个 screenrecord 进程，把 H.264 裸流写到 stdout。
+ * 组装 screenrecord 的参数（不含 `adb … exec-out` 前缀）。
+ * 两种连接引擎共用这一份：adb 走子进程参数数组，WebUSB 走拼成一行的 shell 命令。
  * style: 'eq' 走 --key=value 写法，'two' 走 --key value 写法 ——
  * 不同 Android 版本的 screenrecord 只认其中一种，失败时由上层换一种重试。
  */
-export function spawnScreenRecord(serial, { bitrate = 8_000_000, size = null, style = 'eq' } = {}) {
-  const args = ['-s', serial, 'exec-out', 'screenrecord']
+export function buildScreenRecordArgs({ bitrate = 8_000_000, size = null, style = 'eq' } = {}) {
+  const args = ['screenrecord']
   const opt = (name, value) => {
     if (style === 'two') args.push(`--${name}`, String(value))
     else args.push(`--${name}=${value}`)
@@ -39,8 +40,12 @@ export function spawnScreenRecord(serial, { bitrate = 8_000_000, size = null, st
   opt('time-limit', RECORD_TIME_LIMIT)
   // 文件名用 - 表示写 stdout（h264 裸流才能管道输出，mp4 需要可 seek 的文件）
   args.push('-')
+  return args
+}
 
-  return spawn(ADB_BIN, args, {
+/** 启动一个 screenrecord 进程，把 H.264 裸流写到 stdout */
+export function spawnScreenRecord(serial, options = {}) {
+  return spawn(ADB_BIN, ['-s', serial, 'exec-out', ...buildScreenRecordArgs(options)], {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,

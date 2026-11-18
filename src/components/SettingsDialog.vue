@@ -112,10 +112,39 @@
           </div>
         </div>
 
+        <div class="set-block">
+          <div class="set-text">
+            <div class="set-label">连接引擎</div>
+            <div class="set-desc">
+              服务端用哪条路径和手机通信。<strong>USB 接口同一时刻只能被一个程序占用</strong>，所以两个引擎互斥：
+              切到「USB 直连」前先 <span class="mono">adb kill-server</span>，切回「ADB 命令」则不受影响。切换后会自动刷新设备列表。
+            </div>
+          </div>
+          <div class="engine-list">
+            <button
+              v-for="e in engines"
+              :key="e.id"
+              type="button"
+              class="engine-card"
+              :class="{ active: e.id === engine, off: !e.ok }"
+              :title="e.ok ? e.detail : e.error || '当前不可用'"
+              @click="pickEngine(e)"
+            >
+              <div class="engine-head">
+                <span class="engine-name">{{ e.label }}</span>
+                <span class="engine-flag" :class="e.ok ? 'ok' : 'bad'">{{ e.ok ? '可用' : '不可用' }}</span>
+                <el-icon v-if="e.id === engine" class="engine-check"><Select /></el-icon>
+              </div>
+              <div class="engine-desc">{{ e.desc }}</div>
+              <div class="engine-meta">{{ e.ok ? e.detail || '已就绪' : e.error || '不可用' }}</div>
+            </button>
+          </div>
+        </div>
+
         <div class="about-box">
           <div class="about-row">
-            <span>ADB</span>
-            <b class="mono">{{ env?.version || env?.error || '未检测到 adb' }}</b>
+            <span>{{ engineLabel || 'ADB' }}</span>
+            <b class="mono">{{ env?.version || env?.error || '未就绪' }}</b>
           </div>
           <div v-if="env?.adbPath" class="about-row">
             <span>路径</span>
@@ -153,6 +182,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { COLOR_FORMATS } from '../utils/color'
 import {
   COORD_FORMATS,
@@ -170,6 +200,10 @@ const props = defineProps({
   /** 自动恢复实时画面：取消框选（单击 / Esc / 清空）后解除冻结 */
   autoResume: { type: Boolean, default: true },
   env: { type: Object, default: null },
+  /** 当前连接引擎 id：adb / webusb */
+  engine: { type: String, default: 'adb' },
+  /** 所有可用引擎及其可用性：[{ id, label, desc, ok, detail, error }] */
+  engines: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits([
@@ -179,9 +213,24 @@ const emit = defineEmits([
   'update:coordFormat',
   'update:coordTemplate',
   'update:autoResume',
+  'update:engine',
 ])
 
 const tab = ref('general')
+
+const engineLabel = computed(
+  () => props.engines.find((e) => e.id === props.engine)?.label || '',
+)
+
+/** 不可用的引擎允许点，但只提示原因 —— 用户需要知道为什么切不过去 */
+function pickEngine(e) {
+  if (!e || e.id === props.engine) return
+  if (!e.ok) {
+    ElMessage.warning(e.error || `${e.label}当前不可用`)
+    return
+  }
+  emit('update:engine', e.id)
+}
 
 const coordFormatKey = computed(() => normalizeCoordFormat(props.coordFormat))
 
@@ -234,6 +283,7 @@ const SHORTCUTS = [
       { keys: ['2'], desc: '切换到锚点取色' },
       { keys: ['R'], desc: '恢复实时画面' },
       { keys: ['L'], desc: '开启 / 关闭「实时点击」（远程触控，需先切到录屏画面）' },
+      { keys: ['Esc'], desc: '实时点击时发送真机「返回」键；其余情况是结束取点 / 清除区域' },
       { keys: ['Ctrl', 'S'], desc: '保存截图（有区域存区域，否则整屏）' },
       { keys: ['Ctrl', 'C'], desc: '复制截图到剪贴板（有区域复制区域）' },
       { keys: ['拖入图片'], desc: '把本地图片拖到画面即可切换为图片模式' },
@@ -327,14 +377,101 @@ const SHORTCUTS = [
   background: #fbfcfe;
 }
 
+/* 连接引擎：两张卡片二选一 */
+.engine-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.engine-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 10px;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  font-family: inherit;
+}
+
+.engine-card:hover {
+  border-color: #b6e3e1;
+  background: #fbfefe;
+}
+
+.engine-card.active {
+  border-color: #0ea5a0;
+  background: #f2fbfb;
+  box-shadow: inset 0 0 0 1px #0ea5a0;
+}
+
+.engine-card.off {
+  background: #fafafa;
+  border-style: dashed;
+}
+
+.engine-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.engine-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.engine-flag {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+
+.engine-flag.ok {
+  color: #0b8480;
+  background: #eef8f8;
+  border-color: #d5eeed;
+}
+
+.engine-flag.bad {
+  color: #b45309;
+  background: #fef6e7;
+  border-color: #f6e2b8;
+}
+
+.engine-check {
+  margin-left: auto;
+  color: #0ea5a0;
+  font-size: 13px;
+}
+
+.engine-desc {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.engine-meta {
+  font-size: 10.5px;
+  color: #b6c2d2;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
 .ph-list {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
-}
-
-.ph {
+}.ph {
   font-size: 10.5px;
   line-height: 1;
   padding: 3px 5px;

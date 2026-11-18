@@ -8,6 +8,16 @@
 ## 功能
 
 - **设备连接**：自动列出 `adb devices` 中的设备，支持 USB 与无线（`adb connect ip:port`）；点「无线连接」后输入框自动聚焦，回车即连接，成功后弹窗自动收起并切到该设备；连接的地址会存进「最近连接」（本地持久化，按时间倒序，可单条删除、点一下直接连）。
+- **两种连接引擎（设置 → 通用 → 连接引擎）**：服务端和手机之间的通道有两条，随时可切，选择记在项目根的
+  `.adb-helper.json`（已 gitignore）：
+  - **ADB 命令**（默认）：起 `adb` 命令（platform-tools），功能最全 —— 无线调试、mDNS 局域网发现与配对都靠它。
+  - **USB 直连**：用内置的 [Tango](https://github.com/yume-chan/ya-webadb)（`@yume-chan/adb`）+ `usb` 包，
+    直接和手机上的 adbd 说 ADB 协议，**不需要安装 platform-tools**。截图、录屏、`input` 操作全部照常，
+    认证复用 `~/.android/adbkey`（之前授权过就不用再点手机）。
+  - 两个引擎**互斥**：USB 接口同一时刻只能被一个程序占用，切到「USB 直连」前先 `adb kill-server`，
+    否则会提示接口被占用；Windows 上要求 ADB 接口绑定 WinUSB 驱动（Google USB Driver 与多数厂商驱动都是）。
+  - 「USB 直连」不支持 Android 11+ 的无线调试配对与 mDNS 发现（这两项能力长在 adb 自己身上），
+    切过去后「无线连接」入口会自动隐藏。
 - **局域网设备自动发现（mDNS）**：adb 支持 `mdns` 时（platform-tools 30+，`adb mdns check` 能返回 daemon 版本），
   「无线连接」弹窗会用 `adb mdns services` 扫出同一局域网里开了「无线调试」的设备并直接列出（弹窗打开即扫，之后每 10 秒刷新一次），
   点一下就连：已在线（`_adb-tls-connect`）直接切到该设备，尚未配对（`_adb-tls-pairing`）会先弹框要 6 位配对码、
@@ -59,7 +69,13 @@
 - **代码生成**：区域 / 锚点 / 找色 三段 AutoJs6 代码一键复制；区域那段依次给出**裁剪、点击中心、区域内找色、
   区域内找图（单处，`images.findImage`）、区域内找图（多处，`images.matchTemplate` 一次返回所有命中点）**示例，
   模板直接用上面导出的区域 PNG。
-- **设备操作**：保存整屏、按锚点点击、返回 / Home / 最近任务。
+- **设备操作**：保存整屏、按锚点点击、返回 / Home / 最近任务、**锁屏 / 解锁屏幕**。
+  锁屏走 `KEYCODE_POWER`，会先探一次电源状态再按 —— 它是个开关，屏幕已经关着时再按会点亮；
+  解锁只发 `KEYCODE_WAKEUP`（只亮不灭）唤醒，确认停在锁屏才上滑一次；**不调 `wm dismiss-keyguard`** ——
+  实测小米平板（MIUI / Android 15）上那条命令会把屏幕**直接灭掉**，比不划还糟。
+  唤醒的同时会临时打开「充电时保持唤醒」：注入的输入事件不会重置系统息屏计时器，
+  不这么做屏幕刚亮就被计时器关掉（这台机器只有 10s）。关服务时会还原该设置。
+  设了 PIN / 图案的设备系统不允许免密切断，解锁最多把界面送到解锁页，会按 `mCurrentFocus` 判断并如实提示。
 - **远程触控（录屏专用）**：右侧「设备与操作 → 远程触控」一个 **实时点击** 开关，开启后画面就是一块触摸板，
   **画面保持实时、不冻结也不取色**：
   - 开启时会**自动取消已有的框选**（触控和选区互斥，否则点画面到底是操作真机还是继续调选区会有歧义），
@@ -71,6 +87,7 @@
     服务端按 ack 控制排队长度，跟不上时自动丢掉中间点，不会越拖越滞后。断线 / 刷新页面 / 停服务都会兜底抬起手指。
   - 放大后想看看画面别处：**右键**（或中键 / `Alt` / `空格`）拖动画布即可平移，和框选模式下的平移完全一致，
     且不会往真机发任何触摸事件，松手后真机状态不受影响。
+  - **按 `Esc` 发送真机「返回」键**（按住不放不会连发，只响应第一次按下），不想挪鼠标去点按钮时很顺手。
   - 点画面外的留白不会误触。再点一次开关、按 `L` 或「退出触控」即可恢复框选 / 取色，
     切回截图模式或切到图片模式也会自动退出。
 - **演示模式**：没有设备时自动生成一块会动的模拟屏幕，功能可完整体验。
@@ -211,6 +228,7 @@ ADB_PATH=/Users/me/platform-tools/adb npm run dev
 | GET | `/api/pixel?serial=&x=&y=&frame=` | 精确取色（GET 形式） |
 | POST | `/api/findColor` | 全屏找色 `{ serial, color, threshold, region, frameId, fresh? }` |
 | POST | `/api/tap` `/api/swipe` `/api/key` | 设备操作（单次点击 / 滑动 / 按键；「点击锚点」「返回」等按钮用） |
+| POST | `/api/screen` | 锁屏 / 解锁 `{ serial, action }`，`action` = `lock` \| `unlock` |
 | POST | `/api/drag` | 一步到位的长按拖拽（`input draganddrop`，老系统回退到 `motionevent` 组合），脚本 / 调试用 |
 | WS | `/ws/screen?serial=&fps=&scale=&level=&mode=&bitrate=` | 投屏推流（`mode=screenshot` 走 PNG 无损；`mode=record` 走 H.264 裸流，`bitrate` 单位 bps） |
 | WS 消息 | `{ type: "touch", phase, x, y }` | 远程触控：`phase` = `down` / `move` / `up` / `cancel`，走同一条投屏连接，实时注入到真机 |

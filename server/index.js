@@ -1,20 +1,6 @@
 import { WebSocketServer } from 'ws'
-import {
-  adbConnect,
-  adbDisconnect,
-  adbPair,
-  capturePng,
-  getAdbVersion,
-  getDeviceInfo,
-  listDevices,
-  mdnsCheck,
-  mdnsServices,
-  runAdb,
-  shellDragAndDrop,
-  shellKey,
-  shellSwipe,
-  shellTap,
-} from './adb.js'
+import { runAdb } from './adb.js'
+import * as engine from './engine.js'
 import {
   cropRegion,
   encodeFrame,
@@ -24,10 +10,45 @@ import {
   readSize,
   renderDemoFrame,
 } from './frame.js'
-import { fitRecordSize, looksLikeArgError, spawnScreenRecord } from './record.js'
+import { fitRecordSize, looksLikeArgError } from './record.js'
 import { closeAllTouches, releaseTouch, touchEvent } from './touch.js'
 
 const DEMO_SERIAL = 'demo'
+
+/** 无线调试（配对 / mDNS）长在 adb 上，只有 adb 引擎能做 */
+const adbEngine = engine.engineById('adb')
+
+/** 当前引擎的对外描述：前端据此显示「已就绪」与不可用原因 */
+async function engineEnv() {
+  const st = await engine.status()
+  const cur = st.engines.find((e) => e.id === st.current) || {}
+  return {
+    ok: !!cur.ok,
+    version: cur.ok ? (cur.id === 'adb' ? cur.detail : `USB 直连 · ${cur.detail}`) : '',
+    adbPath: cur.id === 'adb' ? cur.path || '' : '',
+    error: cur.ok ? '' : cur.error || '',
+    hint: cur.hint || '',
+    engine: st.current,
+    engineLabel: cur.label || '',
+    engineShort: cur.short || '',
+    engines: st.engines,
+    platform: process.platform,
+    node: process.version,
+  }
+}
+
+/**
+ * 当前引擎不支持某项能力时统一返回这个。
+ * soft=true 用于「发现类」接口（mDNS）：前端按 supported=false 自行隐藏列表；
+ * 其余（配对 / 连接）返回 ok=false，前端会直接把 error 弹出来。
+ */
+function unsupported(res, feature, { soft = false } = {}) {
+  const message = `当前连接引擎不支持${feature}，切到「ADB 命令」后可用`
+  if (soft) {
+    return sendJson(res, { ok: true, supported: false, reason: 'engine', message, services: [] })
+  }
+  return sendJson(res, { ok: false, error: message }, 400)
+}
 
 /* --------------------- 本地图片数据源（作为伪设备参与取色/找色） --------------------- */
 const imageStore = new Map()
@@ -71,7 +92,7 @@ function getPng(serial, { maxAge = 800, force = false } = {}) {
 
   const promise = (async () => {
     if (serial === DEMO_SERIAL) return renderDemoFrame()
-    return capturePng(serial)
+    return engine.current().screenshot(serial)
   })()
 
   pngCache.set(serial, { at: Date.now(), promise })
@@ -158,8 +179,227 @@ function readBody(req, limit = 2 * 1024 * 1024) {
   })
 }
 
+/* ------------------------------ 保持常亮 ------------------------------ */
+/**
+ * serial -> 改动前的 stay_on_while_plugged_in 原值。
+ * 解锁必须配这个：注入式唤醒不会重置系统的休眠计时器，屏幕刚亮就会因为「早就该睡了」立刻熄掉，
+ * 表现就是"点亮了但一秒后又黑"。插着 USB 时把这一位置起来，屏幕才会真的待在那儿。
+ */
+const stayOnPatches = new Map()
+
+/** 开启「插电保持唤醒」，只加 usb 这一位，别覆盖用户原有的 ac / wireless 设置 */
+async function ensureStayAwake(eng, serial) {
+  if (stayOnPatches.has(serial)) return false
+  try {
+    const r = await eng.shellText(serial, 'settings get global stay_on_while_plugged_in')
+    const raw = String(r.text || '').trim()
+    const prev = Number.parseInt(raw, 10)
+    const base = Number.isFinite(prev) ? prev : 0
+    stayOnPatches.set(serial, Number.isFinite(prev) ? String(prev) : '0')
+    if ((base & 2) !== 0) return false // 已经是插电常亮了，不用改
+    await eng.shellText(serial, `settings put global stay_on_while_plugged_in ${base | 2}`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 服务关闭 / 退出时把改过的设置还原回去，别在用户设备上留改动 */
+export async function restoreStayAwake() {
+  if (!stayOnPatches.size) return
+  const eng = engine.current()
+  for (const [serial, prev] of [...stayOnPatches.entries()]) {
+    stayOnPatches.delete(serial)
+    try {
+      await eng.shellText(serial, `settings put global stay_on_while_plugged_in ${prev}`)
+    } catch {}
+  }
+}
+
+/* ------------------------------ 锁屏 / 解锁 ------------------------------ */
+/**
+ * 读当前电源状态（Awake / Asleep / Dreaming）。
+ *
+ * 先用带管道的快命令（实测 ~160ms），`grep` 刻意不带 `-m1`：它命中后立刻关管道，
+ * dumpsys 被 SIGPIPE 打死，USB 直连引擎上会收不到退出包而卡住（实测 8s 都回不来）。
+ * 管道在个别 ROM 上不可用时，退回整段 `dumpsys power`（~750ms、220KB+，稳但慢）。
+ * 都探不到返回 null，交给调用方按「状态未知」处理，而不是猜成「已亮屏」。
+ */
+async function readWakefulness(eng, serial) {
+  const pick = (text) => String(text || '').match(/mWakefulness=(\w+)/)?.[1] || null
+
+  try {
+    const fast = pick((await eng.shellText(serial, 'dumpsys power | grep mWakefulness')).text)
+    if (fast) return fast
+  } catch {}
+
+  try {
+    const slow = pick((await eng.shellText(serial, 'dumpsys power', { timeout: 15000 })).text)
+    if (slow) return slow
+  } catch {}
+
+  return null
+}
+
+const isAwake = (w) => w === 'Awake' || w === 'Dreaming'
+
+/**
+ * 屏幕是不是真的亮着。
+ * 不能用 `mWakefulness` 代替：实测这台平板会出现 `mWakefulness=Awake` 但面板已经灭了的情况
+ * （息屏计时器到点，CPU 还没睡），照它判断就会以为"已经亮着"而跳过唤醒。
+ * `dumpsys display` 的 `mScreenState` 才是面板状态，老系统没有这个字段时退回电源状态。
+ */
+async function readScreenState(eng, serial) {
+  try {
+    const r = await eng.shellText(serial, 'dumpsys display | grep mScreenState=')
+    const m = String(r.text || '').match(/mScreenState=(\w+)/)
+    if (m) return m[1]
+  } catch {}
+  const wakefulness = await readWakefulness(eng, serial)
+  if (wakefulness === 'Asleep') return 'OFF'
+  if (isAwake(wakefulness)) return 'ON'
+  return 'UNKNOWN'
+}
+
+const isScreenOn = (state) => state === 'ON'
+
+/** 锁屏是否还挡在前面：锁屏时焦点窗口是 NotificationShade，解锁后是当前 App */
+async function keyguardShowing(eng, serial) {
+  try {
+    const r = await eng.shellText(serial, 'dumpsys window | grep mCurrentFocus')
+    return /NotificationShade/.test(String(r.text || ''))
+  } catch {
+    return false
+  }
+}
+
+/** 当前这一帧的真实尺寸：`wm size` 给的是面板物理尺寸，横屏时不会跟着转，滑动坐标得按实际画面算 */
+async function currentScreenSize(serial) {
+  try {
+    return await readSize(await getPng(serial, { force: true }))
+  } catch {
+    return null
+  }
+}
+
+/** 上滑划开锁屏：这是用户本来的动作，比调系统接口可靠 */
+async function swipeUpToUnlock(serial) {
+  const size = await currentScreenSize(serial)
+  const w = Number(size?.width) || 0
+  const h = Number(size?.height) || 0
+  if (!w || !h) return false
+  const eng = engine.current()
+  await eng.swipe(serial, {
+    x1: Math.round(w / 2),
+    y1: Math.round(h * 0.82),
+    x2: Math.round(w / 2),
+    y2: Math.round(h * 0.32),
+    duration: 180,
+  })
+  return true
+}
+
+/** adb / shell 的原始报错对用户没什么用，能认出来的就翻译成一句人话 */
+function explainShellFailure(text) {
+  const raw = String(text || '').trim()
+  if (/not found|no devices|device offline/i.test(raw)) {
+    return '设备已断开：可能重新插拔过，刷新设备列表后重试'
+  }
+  return raw || '执行失败'
+}
+
+/**
+ * 确保屏幕亮着。
+ * 先发 KEYCODE_WAKEUP（只亮不灭，最安全）；部分 ROM 不响应注入的 WAKEUP，就退回电源键 ——
+ * 此时已经确认是熄屏状态，按 26 只会点亮，不会把屏幕关掉。每步都回读状态，别靠猜。
+ */
+/**
+ * 确保屏幕亮着。
+ * 只用 KEYCODE_WAKEUP(224) —— 它只会亮不会灭。绝不能用 POWER(26) 兜底：
+ * 那是个开关，一旦状态读慢了（刚点亮但 dumpsys 还没刷新），26 会把刚亮的屏幕又关掉，
+ * 表现就是"点了解锁结果屏幕更黑了"。宁可多试一次 224。
+ */
+async function wakeScreen(eng, serial) {
+  if (isScreenOn(await readScreenState(eng, serial))) return { ok: true, woke: false }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await eng.shellText(serial, 'input keyevent 224')
+    // 面板点亮有延迟：实测这台平板要 ~2s 才真正亮起来，给短了会以为没醒
+    await sleep(900)
+    if (isScreenOn(await readScreenState(eng, serial))) {
+      // 亮起来之后还要等它画完第一帧，输入焦点才会从 NotificationShade 切回前台应用
+      await sleep(600)
+      return { ok: true, woke: true }
+    }
+  }
+  return { ok: false, woke: true }
+}
+
+/**
+ * 锁屏 / 解锁屏幕。
+ * - 锁屏靠 KEYCODE_POWER(26)，但它是个开关：屏幕本来就关着时再按会点亮，所以先探状态保证幂等。
+ * - 解锁先保证亮屏，再 `wm dismiss-keyguard` 划开通知锁；老系统没这个子命令时退回上滑手势。
+ * - 设了 PIN / 图案的设备，系统不允许免密划开，这里最多把界面送到解锁页。
+ */
+async function screenPower(serial, action) {
+  if (serial === DEMO_SERIAL) {
+    return { ok: true, message: action === 'lock' ? '演示模式：已模拟锁屏' : '演示模式：已模拟解锁' }
+  }
+  const eng = engine.current()
+  const screenState = await readScreenState(eng, serial)
+
+  if (action === 'lock') {
+    // 用面板状态判断，不能用 mWakefulness：Awake 但面板已灭时再按 POWER 会把屏幕点亮
+    if (!isScreenOn(screenState)) return { ok: true, message: '屏幕已经处于关闭状态' }
+    const r = await eng.shellText(serial, 'input keyevent 26')
+    return {
+      ok: r.code === 0,
+      message: r.code === 0 ? '已锁屏' : explainShellFailure(r.text),
+    }
+  }
+
+  // 顺序很重要：先把「插电常亮」打开，再唤醒。
+  // 注入的输入事件不会重置系统的息屏计时器（实测这台机器只有 10s），
+  // 晚一步打开的话屏幕刚亮就被计时器关掉，看起来就是"解锁了但一片黑"。
+  const stayOn = await ensureStayAwake(eng, serial)
+  const suffix = stayOn ? '（已开启「充电时保持唤醒」，关服务时还原）' : ''
+
+  const wake = await wakeScreen(eng, serial)
+  if (!wake.ok) {
+    return { ok: false, message: `没能点亮屏幕：设备不响应唤醒键，请手动按一下电源键${suffix}` }
+  }
+
+  // 唤醒之后先等第一帧画完，再判断有没有锁屏。
+  // 这段顺序是踩出来的：刚点亮时焦点还挂在 NotificationShade 上，
+  // 过早判断会误以为"还锁着"，接着去划屏 / 调 dismiss-keyguard，
+  // 而那些操作在部分 ROM 上反而会把刚亮的屏幕关掉。
+  if (wake.woke) await sleep(600)
+  const locked = await keyguardShowing(eng, serial)
+
+  if (!locked) return { ok: true, message: `已解锁${suffix}` }
+
+  // 确实停在锁屏上：先按用户的真实动作上滑一次，不行就如实说明。
+  // 这里不再调 `wm dismiss-keyguard` —— 实测小米平板会把屏幕直接灭掉，比不划还糟。
+  await swipeUpToUnlock(serial)
+  await sleep(700)
+  if (!(await keyguardShowing(eng, serial))) return { ok: true, message: `已解锁${suffix}` }
+
+  return { ok: true, message: `已亮屏，但锁屏没划开：设了密码 / 图案时需要手动输入${suffix}` }
+}
+
+/** 探测单台设备信息：USB 直连时要先认证，未授权会一直等手机确认，所以加个上限 */function withTimeout(promise, ms, label) {
+  let timer
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label}超时（${ms}ms）`)), ms)
+    }),
+  ])
+}
+
 async function enrichDevices() {
-  const devices = await listDevices()
+  const eng = engine.current()
+  const devices = await eng.devices()
   const enriched = []
   for (const d of devices) {
     const base = d.model || d.mdnsName || d.serial
@@ -169,10 +409,11 @@ async function enrichDevices() {
     const item = { ...d, label, ready: d.state === 'device' }
     if (item.ready) {
       try {
-        const info = await getDeviceInfo(d.serial)
+        const info = await withTimeout(eng.info(d.serial), 6000, '读取设备信息')
         item.screen = info.screen
         item.brand = info.brand
         item.androidVersion = info.androidVersion
+        item.model = item.model || info.model
       } catch {
         item.screen = null
       }
@@ -234,13 +475,29 @@ async function handleApi(req, res, url) {
   const q = url.searchParams
 
   if (p === '/api/env') {
-    const env = await getAdbVersion()
-    return sendJson(res, { ...env, platform: process.platform, node: process.version })
+    return sendJson(res, await engineEnv())
+  }
+
+  /* ------------------------------ 连接引擎设置 ------------------------------ */
+  if (p === '/api/settings') {
+    if (req.method === 'POST') {
+      const body = await readBody(req)
+      const id = String(body.engine || '').trim()
+      if (!id) return sendJson(res, { ok: false, error: '缺少 engine' }, 400)
+      if (!engine.engineById(id)) return sendJson(res, { ok: false, error: `未知的连接引擎：${id}` }, 400)
+      const st = await engine.setEngine(id)
+      // 切换引擎后旧引擎的画面缓存全失效：设备可能连型号都不同，不能让前端拿到上一台设备的帧
+      pngCache.clear()
+      frameStore.clear()
+      return sendJson(res, { ok: true, ...st, env: await engineEnv() })
+    }
+    const st = await engine.status()
+    return sendJson(res, { ok: true, ...st, env: await engineEnv() })
   }
 
   if (p === '/api/devices') {
-    const env = await getAdbVersion()
-    if (!env.ok) return sendJson(res, { ok: false, adb: env, error: env.error, devices: [] })
+    const env = await engineEnv()
+    if (!env.ok) return sendJson(res, { ok: false, adb: env, error: env.error || '连接引擎不可用', devices: [] })
     try {
       const devices = await enrichDevices()
       return sendJson(res, { ok: true, adb: env, devices })
@@ -251,8 +508,9 @@ async function handleApi(req, res, url) {
 
   // 局域网设备发现：adb 编了 mdns 支持就用 mDNS 扫（Android 11+ 无线调试），否则 supported=false
   if (p === '/api/mdns') {
+    if (!engine.current().capabilities.mdns) return unsupported(res, '局域网设备发现', { soft: true })
     const force = q.get('refresh') === '1'
-    const probe = await mdnsCheck({ force })
+    const probe = await adbEngine.mdns.check({ force })
     if (!probe.ok) {
       return sendJson(res, {
         ok: true,
@@ -263,10 +521,10 @@ async function handleApi(req, res, url) {
       })
     }
     try {
-      const result = await mdnsServices({ force })
+      const result = await adbEngine.mdns.services({ force })
       let known = []
       try {
-        known = await listDevices()
+        known = await adbEngine.devices()
       } catch {}
       const serialSet = new Set(known.map((d) => d.serial))
       const byHost = new Map()
@@ -300,19 +558,21 @@ async function handleApi(req, res, url) {
 
   // 无线调试配对：6 位配对码来自设备屏幕上的「使用配对码配对设备」
   if (p === '/api/pair' && req.method === 'POST') {
+    if (!engine.current().capabilities.wireless) return unsupported(res, '无线调试配对')
     const body = await readBody(req)
     const address = String(body.address || '').trim()
     const code = String(body.code || '').replace(/\D/g, '')
     if (!address) return sendJson(res, { ok: false, error: '缺少 address' }, 400)
     if (code.length !== 6) return sendJson(res, { ok: false, error: '配对码应为 6 位数字' }, 400)
-    const r = await adbPair(address, code)
+    const r = await adbEngine.pair(address, code)
     return sendJson(res, r)
   }
 
   if (p === '/api/connect' && req.method === 'POST') {
+    if (!engine.current().capabilities.wireless) return unsupported(res, '无线连接')
     const body = await readBody(req)
     if (!body.address) return sendJson(res, { ok: false, error: '缺少 address' }, 400)
-    const r = await adbConnect(String(body.address).trim())
+    const r = await adbEngine.connect(String(body.address).trim())
     if (r.ok) {
       try { await runAdb(['-s', String(body.address).trim(), 'wait-for-device'], { timeout: 8000 }) } catch {}
     }
@@ -320,8 +580,9 @@ async function handleApi(req, res, url) {
   }
 
   if (p === '/api/disconnect' && req.method === 'POST') {
+    if (!engine.current().capabilities.wireless) return unsupported(res, '无线连接')
     const body = await readBody(req)
-    const r = await adbDisconnect(String(body.address || '').trim())
+    const r = await adbEngine.disconnect(String(body.address || '').trim())
     return sendJson(res, r)
   }
 
@@ -368,7 +629,7 @@ async function handleApi(req, res, url) {
         density: 480,
       })
     }
-    const info = await getDeviceInfo(serial, { force: q.get('force') === '1' })
+    const info = await engine.current().info(serial, { force: q.get('force') === '1' })
     return sendJson(res, { ok: true, demo: false, ...info })
   }
 
@@ -441,14 +702,14 @@ async function handleApi(req, res, url) {
   if (p === '/api/tap' && req.method === 'POST') {
     const body = await readBody(req)
     if (body.serial === DEMO_SERIAL) return sendJson(res, { ok: true, message: '演示模式：已模拟点击' })
-    const r = await shellTap(body.serial, Math.round(body.x), Math.round(body.y))
+    const r = await engine.current().tap(body.serial, Math.round(body.x), Math.round(body.y))
     return sendJson(res, { ok: r.ok, message: r.message || `tap ${body.x},${body.y}` })
   }
 
   if (p === '/api/swipe' && req.method === 'POST') {
     const body = await readBody(req)
     if (body.serial === DEMO_SERIAL) return sendJson(res, { ok: true, message: '演示模式：已模拟滑动' })
-    const r = await shellSwipe(body.serial, {
+    const r = await engine.current().swipe(body.serial, {
       x1: Math.round(body.x1),
       y1: Math.round(body.y1),
       x2: Math.round(body.x2),
@@ -462,7 +723,7 @@ async function handleApi(req, res, url) {
   if (p === '/api/drag' && req.method === 'POST') {
     const body = await readBody(req)
     if (body.serial === DEMO_SERIAL) return sendJson(res, { ok: true, message: '演示模式：已模拟长按拖拽' })
-    const r = await shellDragAndDrop(body.serial, {
+    const r = await engine.current().dragDrop(body.serial, {
       x1: Math.round(body.x1),
       y1: Math.round(body.y1),
       x2: Math.round(body.x2),
@@ -475,8 +736,26 @@ async function handleApi(req, res, url) {
   if (p === '/api/key' && req.method === 'POST') {
     const body = await readBody(req)
     if (body.serial === DEMO_SERIAL) return sendJson(res, { ok: true, message: `演示模式：已模拟按键 ${body.key}` })
-    const r = await shellKey(body.serial, body.key)
+    const r = await engine.current().key(body.serial, body.key)
     return sendJson(res, { ok: r.ok, message: r.message || `key ${body.key}` })
+  }
+
+  // 锁屏 / 解锁屏幕（解锁最多送到解锁页：设了密码 / 图案的设备系统不允许免密切断）
+  if (p === '/api/screen' && req.method === 'POST') {
+    const body = await readBody(req)
+    const serial = String(body.serial || '').trim()
+    const action = String(body.action || '').trim()
+    if (!serial) return sendJson(res, { ok: false, error: '缺少 serial' }, 400)
+    if (action !== 'lock' && action !== 'unlock') {
+      return sendJson(res, { ok: false, error: 'action 只能是 lock 或 unlock' }, 400)
+    }
+    try {
+      const r = await screenPower(serial, action)
+      // 前端把 ok:false 当成失败，并且只认 error 字段，这里补一下，别让真正的原因被「请求失败」盖掉
+      return sendJson(res, r.ok ? r : { ...r, error: r.message || '操作失败' })
+    } catch (err) {
+      return sendJson(res, { ok: false, error: err.message || String(err) }, 500)
+    }
   }
 
   if (p === '/api/size') {
@@ -587,7 +866,8 @@ function attachWebSocket(httpServer) {
         }
         const t0 = Date.now()
         try {
-          const png = serial === DEMO_SERIAL ? await getPng(serial, { maxAge: 0, force: true }) : await capturePng(serial)
+          const png =
+            serial === DEMO_SERIAL ? await getPng(serial, { maxAge: 0, force: true }) : await engine.current().screenshot(serial)
           if (closed || my !== token) break
           const frameId = storeFrame(serial, png)
           // 同步刷新缓存，使「取色 / 找色」在帧被淘汰时可秒回
@@ -622,7 +902,7 @@ function attachWebSocket(httpServer) {
           let deviceGone = false
           if (serial !== DEMO_SERIAL) {
             try {
-              const list = await listDevices()
+              const list = await engine.current().devices()
               deviceGone = !list.some((d) => d.serial === serial && d.state === 'device')
             } catch {}
           }
@@ -673,7 +953,7 @@ function attachWebSocket(httpServer) {
 
         let child
         try {
-          child = spawnScreenRecord(serial, { bitrate: cfg.bitrate, size, style: recordStyle })
+          child = engine.current().record(serial, { bitrate: cfg.bitrate, size, style: recordStyle })
         } catch (err) {
           send({ type: 'record', state: 'fatal', message: `无法启动 adb：${err.message}` })
           return
@@ -751,7 +1031,7 @@ function attachWebSocket(httpServer) {
 
         let deviceGone = false
         try {
-          const list = await listDevices()
+          const list = await engine.current().devices()
           deviceGone = !list.some((d) => d.serial === serial && d.state === 'device')
         } catch {}
 
@@ -895,8 +1175,18 @@ export function adbHelperPlugin() {
         server.httpServer.keepAliveTimeout = 120000
         server.httpServer.headersTimeout = 125000
         attachWebSocket(server.httpServer)
-        // 退出时收掉触摸 shell，别在设备上留一个按住不放的手指
-        process.once('exit', closeAllTouches)
+        // 退出时收掉触摸 shell，别在设备上留一个按住不放的手指；
+        // 同时释放 USB 接口 —— 句柄不放，下次启动 claim 就是 error 5
+        process.once('exit', () => {
+          closeAllTouches()
+          restoreStayAwake().catch(() => {})
+          engine.dispose()
+        })
+        server.httpServer.on('close', () => {
+          closeAllTouches()
+          restoreStayAwake().catch(() => {})
+          engine.dispose()
+        })
         server.config.logger.info('\n  \x1b[36m➜\x1b[0m  ADB 辅助服务已就绪：/api/*  ·  /ws/screen\n')
       }
       if (server.httpServer) attach()

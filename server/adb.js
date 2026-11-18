@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { INFO_SHELL_CMD, getCachedInfo, parseDeviceInfo, setCachedInfo } from './device-info.js'
 
-const ADB_BIN = process.env.ADB_PATH || 'adb'
+export const ADB_BIN = process.env.ADB_PATH || 'adb'
 
 /** 执行 adb 命令，二进制安全（不经过 shell，stdout 以 Buffer 返回） */
 export function runAdb(args, { timeout = 20000 } = {}) {
@@ -241,51 +242,13 @@ export async function capturePng(serial) {
   return buf
 }
 
-const infoCache = new Map()
-
 export async function getDeviceInfo(serial, { force = false } = {}) {
-  if (!force && infoCache.has(serial)) {
-    const cached = infoCache.get(serial)
-    if (Date.now() - cached.ts < 15000) return cached.data
+  if (!force) {
+    const cached = getCachedInfo(serial)
+    if (cached) return cached
   }
-  const cmd = [
-    'wm size',
-    'wm density',
-    'getprop ro.product.model',
-    'getprop ro.product.brand',
-    'getprop ro.build.version.release',
-    'getprop ro.build.version.sdk',
-    'getprop ro.sf.lcd_density',
-  ].join('; ')
-
-  const r = await runAdb(['-s', serial, 'shell', cmd], { timeout: 15000 })
-  const text = r.text || ''
-
-  let physical = null
-  let override = null
-  const sizeMatches = [...text.matchAll(/(Physical|Override) size:\s*(\d+)x(\d+)/g)]
-  for (const m of sizeMatches) {
-    const value = { width: Number(m[2]), height: Number(m[3]) }
-    if (m[1] === 'Physical') physical = value
-    else override = value
-  }
-  const densityMatch = text.match(/Physical density:\s*(\d+)/)
-  const lines = text.split('\n').map((s) => s.trim()).filter(Boolean)
-  const props = lines.filter((l) => !/size:|density:/i.test(l))
-
-  const data = {
-    serial,
-    model: props[0] || '',
-    brand: props[1] || '',
-    androidVersion: props[2] || '',
-    sdk: props[3] || '',
-    screen: override || physical || { width: 0, height: 0 },
-    physical,
-    override,
-    density: densityMatch ? Number(densityMatch[1]) : Number(props[4]) || 0,
-  }
-  infoCache.set(serial, { ts: Date.now(), data })
-  return data
+  const r = await runAdb(['-s', serial, 'shell', INFO_SHELL_CMD], { timeout: 15000 })
+  return setCachedInfo(serial, parseDeviceInfo(serial, r.text))
 }
 
 export async function shellTap(serial, x, y) {
@@ -332,7 +295,20 @@ export async function shellDragAndDrop(serial, { x1, y1, x2, y2, duration = 800 
   }
 }
 
-const KEY_CODES = { back: 4, home: 3, recents: 187, power: 26, volume_up: 24, volume_down: 25, enter: 66 }
+export const KEY_CODES = { back: 4, home: 3, recents: 187, power: 26, volume_up: 24, volume_down: 25, enter: 66 }
+
+/**
+ * 开一条常驻 shell 通道（远程触控用）。
+ * 调用方拿到的是 ChildProcess，stdin / stdout / stderr / kill / close
+ * 与 `spawn(adb …)` 完全一致 —— 这样换连接引擎时上层逻辑不用改。
+ */
+export function openShell(serial) {
+  return spawn(ADB_BIN, ['-s', serial, 'shell'], {
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: false,
+  })
+}
 
 export async function shellKey(serial, key) {
   const code = KEY_CODES[key] ?? Number(key)

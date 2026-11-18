@@ -63,6 +63,7 @@
             </el-button>
 
             <el-popover
+              v-if="wirelessOk"
               v-model:visible="connectOpen"
               placement="bottom-start"
               :width="318"
@@ -276,9 +277,9 @@
 
       <div class="hb-status">
         <el-tag size="small" :type="adbOk ? 'success' : 'danger'" effect="light" round class="adb-tag">
-          <span class="tag-text mono">{{ adbOk ? 'ADB 已就绪' : 'ADB 未就绪' }}</span>
+          <span class="tag-text mono">{{ adbOk ? `${engineShort || 'ADB'} 已就绪` : `${engineShort || 'ADB'} 未就绪` }}</span>
         </el-tag>
-        <el-tooltip :content="env?.version || env?.error || '正在检测 adb'" placement="bottom-end">
+        <el-tooltip :content="engineTip" placement="bottom-end">
           <el-icon class="help-dot"><InfoFilled /></el-icon>
         </el-tooltip>
       </div>
@@ -481,11 +482,14 @@
       :coord-template="coordTemplate"
       :auto-resume="autoResume"
       :env="env"
+      :engine="env?.engine || 'adb'"
+      :engines="env?.engines || []"
       @update:toolbar="setToolbarDefault"
       @update:color-format="setColorFormat"
       @update:coord-format="setCoordFormat"
       @update:coord-template="setCoordTemplate"
       @update:auto-resume="setAutoResume"
+      @update:engine="switchEngine"
     />
   </div>
 </template>
@@ -877,6 +881,20 @@ const fps = ref(FPS_OPTIONS[0])
 const scale = ref(1)
 
 const adbOk = computed(() => !!env.value?.ok)
+/** 当前引擎的能力集：无线调试 / mDNS 只有 adb 引擎有，入口要跟着隐藏 */
+const currentCapabilities = computed(
+  () => (env.value?.engines || []).find((e) => e.id === env.value?.engine)?.capabilities || {},
+)
+const wirelessOk = computed(() => !!currentCapabilities.value.wireless)
+/** 当前连接引擎的短名（ADB / WebUSB），顶栏标签用它，避免切了引擎还写着 ADB */
+const engineShort = computed(() => env.value?.engineShort || 'ADB')
+const engineTip = computed(() => {
+  const list = env.value?.engines || []
+  const cur = list.find((e) => e.id === env.value?.engine)
+  if (!cur) return '正在检测连接引擎'
+  if (!cur.ok) return `${cur.label}不可用：${cur.error || '未知原因'}${cur.hint ? ` · ${cur.hint}` : ''}`
+  return `${cur.label} · ${cur.detail || '已就绪'}`
+})
 const isDemo = computed(() => serial.value === 'demo')
 /** 实际生效的录屏状态：演示模式没有真机，自动退回截图 */
 const recordMode = computed(() => frameSource.value === 'record' && !isDemo.value)
@@ -893,7 +911,7 @@ const statusText = computed(() => {
   }
   if (frozenReason.value === 'lost') return '设备已断开 · 已冻结最后一帧'
   if (streamError.value) return streamError.value
-  if (!adbOk.value) return '未检测到 adb'
+  if (!adbOk.value) return `${engineShort.value} 未就绪`
   if (!serial.value) return '未选择设备'
   if (frozen.value) return '已冻结画面'
   if (!ready.value) return recordMode.value ? '正在启动屏幕录制…' : '正在连接画面…'
@@ -945,6 +963,32 @@ async function refreshDevices(preferSerial = '') {
     ElMessage.error(`读取设备列表失败：${err.message}`)
   } finally {
     loadingDevices.value = false
+  }
+}
+
+/**
+ * 切换连接引擎（设置 → 连接引擎）。
+ * USB 接口是独占的，换引擎等于换了一条通向设备的通道：
+ * 旧设备信息、旧画面帧都不能继续用，所以切完立刻重建推流。
+ */
+async function switchEngine(id) {
+  if (!id || id === (env.value?.engine || 'adb')) return
+  const before = serial.value
+  try {
+    const res = await api.setEngine(id)
+    env.value = res.env
+    // USB 接口独占：从 adb 切到 USB 直连时服务端会代劳 kill-server，得让用户知道一声
+    const released = res.releasedAdb ? '（已自动释放 adb server）' : ''
+    if (res.warning) ElMessage.warning(res.warning)
+    else ElMessage.success(`已切换到「${res.env.engineLabel}」${released}，正在刷新设备`)
+    await refreshDevices()
+    // 设备没变（比如都停在演示模式）时 watch(serial) 不会触发，这里补一次，别让信息面板空着
+    if (serial.value === before) {
+      await loadInfo()
+      stream.connect(streamOptions())
+    }
+  } catch (err) {
+    ElMessage.error(`切换连接引擎失败：${err.message}`)
   }
 }
 
@@ -1491,6 +1535,19 @@ function cycleCoordFormat() {
 /** Shift 单独按下再松开才切换格式，避免 Shift + 方向键微调时误触发 */
 let shiftAlone = false
 
+/**
+ * 实时点击期间按 Esc = 真机「返回键」。
+ * 成功不弹提示（会连按），只在失败时说一声。
+ */
+async function sendBackKey() {
+  if (!serial.value || isDemo.value) return
+  try {
+    await api.key(serial.value, 'back')
+  } catch (err) {
+    ElMessage.error(`返回键发送失败：${err.message}`)
+  }
+}
+
 function onGlobalKeydown(e) {
   if (e.key === 'Shift') {
     shiftAlone = true
@@ -1501,6 +1558,14 @@ function onGlobalKeydown(e) {
 
   const key = String(e.key || '').toLowerCase()
   const mod = e.ctrlKey || e.metaKey
+
+  // 实时点击期间 Esc = 真机「返回键」。此时没有选区、也不在取点，不会和下面原有的 Esc 语义打架；
+  // 按住不放会触发 key repeat，用 e.repeat 挡掉，免得在设备上连按一串返回。
+  if (key === 'escape' && !mod && !e.altKey && liveTouch.value) {
+    e.preventDefault()
+    if (!e.repeat) sendBackKey()
+    return
+  }
 
   if (mod && !e.altKey && !e.shiftKey) {
     if (key === 's') {
