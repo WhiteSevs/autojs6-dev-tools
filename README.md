@@ -198,9 +198,9 @@ npm run preview      # 或把 dist/ 丢到任意静态服务器 / 子目录下
 | `index.html`（根目录） | **打包产物入口**，由 `npm run build` 自动生成（勿手改），资源指向 `./dist/assets/…`，所以仓库根目录本身就能当静态站点托管 |
 | `dist/index.html` | `npm run build` 生成的另一份（资源同级 `./assets/…`），给 `npm run preview` 或整体部署 `dist/` 用 |
 
-> 根 `index.html` 引用的 `./dist/assets/` 不在版本库里（`dist/` 已 gitignore）。
-> 如果要从仓库根目录直接部署（例如 GitHub Pages 选 `main` / 根目录），需要把 `dist/` 一起提交，
-> 或改成构建产物直接输出到根目录。
+> `dist/` 是纳入版本库的（方便直接从仓库根目录部署，例如 GitHub Pages 选 `main` / 根目录，
+> 不需要额外配 Actions）。所以每次 `npm run build` 之后，把 `dist/` 与根 `index.html` 的变更一起提交即可；
+> 只想要源码、不要产物时，把 `dist/` 加回 `.gitignore` 就行。
 
 ## 使用流程
 
