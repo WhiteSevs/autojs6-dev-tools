@@ -238,6 +238,9 @@ const KEY_CODES = {
   menu: 82,
   enter: 66,
   delete: 67,
+  // 键盘 Delete 键是「向后删除」，和退格(67)不是一回事
+  forward_del: 112,
+  space: 62,
   volume_up: 24,
   volume_down: 25,
   volume_mute: 164,

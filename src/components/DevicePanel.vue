@@ -80,7 +80,9 @@
         <el-button v-if="liveTouch" size="small" text @click="emit('update:liveTouch', false)">退出触控</el-button>
       </div>
       <div v-if="liveTouch" class="touch-tips">
-        按下 = 按下 · 拖动实时跟随 · 松开 = 抬起 · <b>Esc</b> = 返回键
+        按下 = 按下 · 拖动实时跟随 · 松开 = 抬起<br />
+        键盘：<b>Esc</b> 返回 · <b>⌫</b> 退格 · <b>Del</b> 删除 · <b>空格</b> 空格<br />
+        <b>F1</b> 静音 · <b>F2</b> 音量- · <b>F3</b> 音量+
       </div>
     </div>
 

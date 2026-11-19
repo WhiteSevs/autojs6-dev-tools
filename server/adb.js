@@ -295,7 +295,21 @@ export async function shellDragAndDrop(serial, { x1, y1, x2, y2, duration = 800 
   }
 }
 
-export const KEY_CODES = { back: 4, home: 3, recents: 187, power: 26, volume_up: 24, volume_down: 25, enter: 66 }
+export const KEY_CODES = {
+  back: 4,
+  home: 3,
+  recents: 187,
+  power: 26,
+  volume_up: 24,
+  volume_down: 25,
+  volume_mute: 164,
+  enter: 66,
+  // 实时点击的键盘映射用到的三个：退格 / 向后删除 / 空格
+  // （KEYCODE_DEL=67 是退格，KEYCODE_FORWARD_DEL=112 才是 Delete 键，别弄反）
+  delete: 67,
+  forward_del: 112,
+  space: 62,
+}
 
 /**
  * 开一条常驻 shell 通道（远程触控用）。

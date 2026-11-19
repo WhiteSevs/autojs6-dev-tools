@@ -1319,12 +1319,15 @@ function onKeyDown(ev) {
 }
 
 function onKeyupSpace(ev) {
+  // 实时点击期间空格发给真机，不再兼职「按住平移」，否则一次按压既打字又平移
+  if (props.liveTouch) return
   if (ev.code === 'Space' && ev.target?.tagName !== 'INPUT' && ev.target?.tagName !== 'TEXTAREA') {
     spaceDown.value = false
   }
 }
 
 function onKeydownSpace(ev) {
+  if (props.liveTouch) return
   if (ev.code === 'Space' && ev.target?.tagName !== 'INPUT' && ev.target?.tagName !== 'TEXTAREA') {
     spaceDown.value = true
   }

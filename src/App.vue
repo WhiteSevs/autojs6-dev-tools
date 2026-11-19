@@ -1589,15 +1589,44 @@ function cycleCoordFormat() {
 let shiftAlone = false
 
 /**
- * 实时点击期间按 Esc = 真机「返回键」。
+ * 实时点击期间的按键映射：画面就是一台真机，键盘直接对它生效。
+ *
+ * 只收「没有别处用途」的键 —— C / L / R / 1 / 2 / P / F / T 这些画面上都有活要干，
+ * 一个都不碰。方向键留给画布（放大后还要靠它们微调），空格平时是按住平移，
+ * 只在实时点击期间让位给真机的空格。
+ *
+ * 音量按 F1 / F2 / F3 直接触发，不用按 Fn：笔记本的 F 排在「多媒体键」模式下本来就会
+ * 把 F1~F3 翻译成静音 / 音量- / 音量+，这时浏览器收到的是 AudioVolumeXxx；
+ * 在「功能键」模式下收到的就是 F1~F3。两类事件都认，所以按 F1 还是 Fn+F1 都能生效。
+ * （Fn 本身浏览器永远收不到，它在硬件层就被吃掉了，所以没法也不需要监听它。）
+ */
+const LIVE_KEYS = {
+  escape: { key: 'back', label: '返回', repeat: false },
+  backspace: { key: 'delete', label: '退格', repeat: true },
+  delete: { key: 'forward_del', label: '删除', repeat: true },
+  space: { key: 'space', label: '空格', repeat: true },
+  f1: { key: 'volume_mute', label: '静音', repeat: false },
+  audiovolumemute: { key: 'volume_mute', label: '静音', repeat: false },
+  f2: { key: 'volume_down', label: '音量-', repeat: true },
+  audiovolumedown: { key: 'volume_down', label: '音量-', repeat: true },
+  f3: { key: 'volume_up', label: '音量+', repeat: true },
+  audiovolumeup: { key: 'volume_up', label: '音量+', repeat: true },
+}
+
+/** 连发的最小间隔：系统一条 key repeat 是 30ms 级，全转发会把设备刷爆、越按越滞后 */
+const LIVE_KEY_REPEAT_MS = 110
+let lastLiveKeyAt = 0
+
+/**
+ * 实时点击期间把某个键转发给真机。
  * 成功不弹提示（会连按），只在失败时说一声。
  */
-async function sendBackKey() {
+async function sendDeviceKey({ key, label }) {
   if (!serial.value || isDemo.value) return
   try {
-    await api.key(serial.value, 'back')
+    await api.key(serial.value, key)
   } catch (err) {
-    ElMessage.error(`返回键发送失败：${err.message}`)
+    ElMessage.error(`${label}键发送失败：${err.message}`)
   }
 }
 
@@ -1612,12 +1641,24 @@ function onGlobalKeydown(e) {
   const key = String(e.key || '').toLowerCase()
   const mod = e.ctrlKey || e.metaKey
 
-  // 实时点击期间 Esc = 真机「返回键」。此时没有选区、也不在取点，不会和下面原有的 Esc 语义打架；
-  // 按住不放会触发 key repeat，用 e.repeat 挡掉，免得在设备上连按一串返回。
-  if (key === 'escape' && !mod && !e.altKey && liveTouch.value) {
-    e.preventDefault()
-    if (!e.repeat) sendBackKey()
-    return
+  // 实时点击期间：键盘直接打在真机上（Esc 返回、⌫ 退格、Del 删除、空格、F1~F3 音量）。
+  // 这里必须 !mod && !alt —— Ctrl+S / Ctrl+C 与 Alt 平移都还要正常用；Shift 不拦，
+  // Shift+删除就是「删」，交给真机自己判断。
+  if (liveTouch.value && !mod && !e.altKey) {
+    // e.key 会随输入法 / 键盘布局变（中文输入法激活时可能给 'Process'），
+    // 再拿 e.code 兜一层：F1~F3 与 Space 的 code 跟布局无关，永远认得出
+    const code = String(e.code || '').toLowerCase()
+    const mapped = LIVE_KEYS[key] || LIVE_KEYS[code] || null
+    if (mapped?.key) {
+      e.preventDefault()
+      const now = Date.now()
+      // 单发键挡掉 key repeat（否则按住 Esc 会退到桌面）；连发键按间隔节流，设备才跟得上
+      if (!e.repeat || (mapped.repeat && now - lastLiveKeyAt >= LIVE_KEY_REPEAT_MS)) {
+        lastLiveKeyAt = now
+        sendDeviceKey(mapped)
+      }
+      return
+    }
   }
 
   if (mod && !e.altKey && !e.shiftKey) {
